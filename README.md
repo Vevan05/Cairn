@@ -144,4 +144,4 @@ Set `VITE_API_URL` on the frontend build to point at the deployed API. Swap `Stu
 
 ## License
 
-MIT — add a LICENSE file before publishing.
+MIT

@@ -5,7 +5,16 @@ on:
   workflow_dispatch:
 
 jobs:
-  stats:
+  stats:git add -A && \
+git commit -m "chore: tests, experiments API, DB schema, bench runner, nightly workflow
+
+- Add unit tests: engine (11), experiments (7), API integration (5) = 23 total passing
+- Wire /experiments + /experiments/{id}/results endpoints to FastAPI
+- Add scripts/init_db.sql (experiments, variants, exposures, outcomes, results + indexes)
+- Add bench/run_all_benchmarks.py orchestrator
+- Add .github/workflows/stats.yml nightly stats job skeleton
+- Fix HNSW entry_point None case for first insert when new_level <= max_level" && \
+git push
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: .
