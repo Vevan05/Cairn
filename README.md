@@ -3,7 +3,7 @@
 A from-scratch RAG search engine with a built-in A/B experimentation platform.
 Pure-Python retrieval (no vector-DB dependency), a React UI, and a free-tier deploy path.
 
-**Status:** feature-complete scaffold — every phase of the build plan implemented and tested (33 tests passing).
+**Status:** feature-complete — every phase of the build plan implemented and tested (**36 tests passing**).
 
 ---
 
@@ -18,12 +18,34 @@ The UI has four tabs:
 
 | Tab | What it does |
 |---|---|
-| **Search** | Ranks the closest corpus passages by cosine similarity. No LLM. |
-| **Answer** | Streams a cited answer token-by-token; clicking a citation highlights its source chunk. |
-| **Experiments** | A/B dashboard **and admin console** — create/pause/delete experiments, edit variants and weights, read z-tests + SRM. |
+| **Search** | Ranks the closest corpus passages by cosine similarity, with a per-result score + confidence bar. No LLM. |
+| **Answer** | Streams a cited answer token-by-token; clicking a citation highlights and scrolls to its source chunk. |
+| **Experiments** | A/B dashboard **and admin console** — create/activate/pause/delete experiments, edit variants and auto-balanced weights, run a traffic simulator, read z-tests + SRM. |
 | **Eval** | Offline eval harness — score vector vs hybrid on a labeled set with recall@k, MRR, nDCG@k. |
 
 Plus a **landing page** at `/` and a **docs page** at `/docs` (how to simulate experiments).
+
+---
+
+## Results
+
+| Metric | Value | Source |
+|---|---|---|
+| int8 quantization memory | **0.89 MB → 0.22 MB** (**4×**) | `bench/benchmark_quantization.py` |
+| int8 vs float32, brute-force recall@10 | **60–80%** overlap | same |
+| int8 avg cosine similarity (dequantized) | **0.684** | same |
+| HNSW recall@10 (M=32, ef₍construction₎=200) | **~0.98** on corpus queries | `bench/benchmark_hnsw.py` |
+| HNSW query latency (610 vectors) | **~0.5 ms** (≈ brute force at this scale) | same |
+| Retrieval — vector: MRR / nDCG@10 | **0.855 / 0.890** | Eval tab / `/eval/run` |
+| Retrieval — hybrid: MRR / nDCG@10 | **0.975 / 0.982** | same |
+| Bucketing split (20k users, 50/50 config) | **49.41% / 50.59%** | `experiments/simulation.py` |
+| Cross-experiment bucket correlation | **+0.007** (want ~0) | same |
+| A/A false-positive rate (α = 0.05) | **4.3%** | same |
+| A/B detection power (+2pp, 3k/arm) | **0.73** (slightly underpowered) | same |
+| Full-experiment result | control **9.95%** vs treatment **12.73%** thumbs-up, **+27.9%** relative, z = −6.20 → *treatment better* | same |
+| SRM detection | 50/50 ok; 52/48, 60/40, 90/10 all flagged | same |
+
+> At ~600 vectors, HNSW latency is comparable to brute force — pure-Python graph traversal overhead dominates. The win appears at 10k+ vectors, where brute force is O(N) per query (see Plan.md).
 
 ---
 
@@ -35,11 +57,12 @@ Plus a **landing page** at `/` and a **docs page** at `/docs` (how to simulate e
 | `engine/` | brute-force & HNSW NN, BM25, RRF fusion, int8 quantization (pure Python) |
 | `experiments/` | SHA-256 bucketing, z-test / Welch's t / χ² SRM, idempotent logging, simulations |
 | `eval/` | offline metrics (recall@k, MRR, nDCG) + labeled-set harness |
-| `api/` | FastAPI: `/health`, `/search`, `/answer(+/stream)`, `/events`, `/experiments` (+CRUD), `/eval` |
+| `api/` | FastAPI: `/health`, `/search`, `/answer(+/stream)`, `/events`, `/experiments` (+CRUD/+activate/+simulate), `/eval` |
 | `web/` | Vite + React + TypeScript + Tailwind UI |
 | `bench/` | reproducible benchmarks (HNSW, quantization, MRR/nDCG) |
-| `tests/` | pytest suite (engine, experiments, API integration) |
+| `tests/` | pytest suite (36 tests) |
 | `scripts/` | `init_db.sql` for the Postgres schema |
+| `docs/` | `simulation.md` guide |
 
 ---
 
@@ -67,12 +90,12 @@ npm install
 npm run dev                         # http://localhost:5173
 ```
 
-Vite proxies `/search`, `/answer`, `/events`, `/health`, `/experiments` to the backend on `:8000`.
+Vite proxies `/search`, `/answer`, `/events`, `/health`, `/experiments`, `/eval` to the backend on `:8000`.
 
 ### Tests
 
 ```bash
-PYTHONPATH=. pytest -q              # 33 passing
+PYTHONPATH=. pytest -q              # 36 passing
 ```
 
 ---
@@ -93,7 +116,12 @@ Questions about the corpus (Valkyria Chronicles III, Egyptian deities, Zrínyi, 
 
 ## Experimentation
 
-Each `/search` call assigns a variant via `hash(experiment_id + ":" + user_id) % 10000` and logs an exposure. Thumbs-up/down post to `/events` as outcomes. `GET /experiments/{id}/results` computes the stats.
+Each `/search` call assigns a variant via `SHA-256(experiment_id + ":" + user_id) % 10000` and logs an exposure. Thumbs up/down post to `/events` as outcomes. `GET /experiments/{id}/results` computes the stats.
+
+- **Active experiment** — only one experiment serves traffic at a time; `POST /experiments/{id}/activate` switches it (and pauses the previous).
+- **User-scoped outcomes** — the unit of analysis is the user: one exposure and at most one vote per user per variant, so `outcomes ≤ exposures` always holds.
+- **Admin console** — create/pause/delete experiments with server-side validation (≥ 2 variants, unique names, positive weights). Splits auto-balance to 100 (typing 70 sets the other to 30).
+- **Traffic simulator** — `POST /experiments/{id}/simulate` fills an experiment with synthetic users so the z-test and SRM checks actually run (see below).
 
 See the layer run end-to-end:
 
@@ -103,11 +131,23 @@ PYTHONPATH=. python experiments/simulation.py
 
 Prints bucketing validation, an A/A false-positive check (≈ α), A/B detection power, SRM cases, and a full experiment table.
 
-### Admin console
-The Experiments tab can create, pause, update, and delete experiments (variants, weights, retrieval config), with server-side validation (≥2 variants, unique names, positive weights).
+### Simulating traffic
 
-### Offline evaluation
-The Eval tab scores any config on a labeled set (`question → relevant chunk ids`) and returns a recall@k / MRR / nDCG@k table for **vector vs hybrid**. Seed a corpus-derived sample set from the UI, or paste your own JSON. API: `POST /eval/sets`, `POST /eval/sets/sample`, `POST /eval/run`.
+The admin console has a **Simulate traffic** row (users + lift). It generates distinct users, buckets each with the real hashing function, and logs exposures + thumbs with a configurable lift — through the same helpers as live traffic. Full guide: [`docs/simulation.md`](docs/simulation.md) or `/docs` in the app.
+
+```bash
+curl -s -X POST localhost:8000/experiments/demo/simulate \
+  -H 'Content-Type: application/json' \
+  -d '{"n_users":1000,"treatment_lift":0.10,"seed":1}'
+```
+
+---
+
+## Offline evaluation
+
+The Eval tab scores any config on a labeled set (`question → relevant chunk ids`) and returns a recall@k / MRR / nDCG@k table for **vector vs hybrid**. Seed a corpus-derived sample set from the UI, or paste your own JSON.
+
+API: `GET /eval/sets`, `POST /eval/sets`, `POST /eval/sets/sample`, `POST /eval/run`, `GET /eval/runs`.
 
 ---
 
@@ -115,8 +155,8 @@ The Eval tab scores any config on a labeled set (`question → relevant chunk id
 
 | Script | Measures |
 |---|---|
-| `bench/benchmark_engine.py` | int8 quantization: **4× memory reduction** (0.89 → 0.22 MB) |
-| `bench/benchmark_hnsw.py` | HNSW recall vs latency across `efSearch` |
+| `bench/benchmark_engine.py` | brute-force / BM25 / RRF sanity + int8 memory |
+| `bench/benchmark_hnsw.py` | HNSW recall@10 and latency across `efSearch` |
 | `bench/benchmark_quantization.py` | float32 vs int8 recall + memory trade-off |
 | `bench/benchmark_day9.py` | MRR@10, nDCG@10 — vector vs BM25 vs RRF hybrid |
 | `bench/run_all_benchmarks.py` | runs them all |
@@ -141,12 +181,13 @@ Set `VITE_API_URL` on the frontend build to point at the deployed API. Swap `Stu
 /engine        pure-Python retrieval (no web deps)
 /pipeline      chunking, embedding, artifact builder
 /experiments   bucketing, stats, SRM, simulations
+/eval          offline metrics + labeled-set harness
 /api           FastAPI wiring + LLM provider
 /web           Vite + React + TS + Tailwind frontend
 /bench         reproducible benchmark scripts
 /scripts       DB schema
 /tests         pytest suite
-/docs          design notes + simulation guide (docs/simulation.md)
+/docs          design notes + simulation guide
 /data          gitignored, produced by build.sh
 ```
 

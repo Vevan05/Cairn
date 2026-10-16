@@ -126,7 +126,7 @@ def main() -> None:
     # ============================================================
     print("\n=== 3. HNSW on Dequantized Vectors ===\n")
 
-    index = HNSW(M=16, ef_construction=40, ef_search=40, random_seed=42)
+    index = HNSW(M=32, ef_construction=200, ef_search=100, random_seed=42)
     for i in range(len(dq_vectors)):
         index.insert(dq_vectors[i], i)
 

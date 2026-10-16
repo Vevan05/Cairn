@@ -50,9 +50,9 @@ class HNSW:
 
     def __init__(
         self,
-        M: int = 16,
-        ef_construction: int = 40,
-        ef_search: int = 40,
+        M: int = 32,
+        ef_construction: int = 200,
+        ef_search: int = 100,
         m_0: int = 1,
         random_seed: int | None = 42,
     ):
@@ -68,6 +68,7 @@ class HNSW:
         self.entry_point: int | None = None  # node ID acting as entry point at top level
         self.nodes: dict[int, HNSWNode] = {}  # node_id -> HNSWNode
         self.vectors: np.ndarray | None = None  # (N, D) float32, indexed by node_id
+        self._dim: int | None = None  # vector dimension, fixed on first insert
 
     # ---- Level randomisation ----
 
@@ -96,255 +97,188 @@ class HNSW:
         """Return the vector for a node_id."""
         if self.vectors is not None and 0 <= node_id < self.vectors.shape[0]:
             return self.vectors[node_id]
-        d = self.vectors.shape[1] if self.vectors is not None and self.vectors.ndim >= 2 else 8
+        # Node not materialised yet (e.g. the node currently being inserted):
+        # fall back to a correctly-sized zero vector so similarity calls don't
+        # raise on a dimension mismatch.
+        d = self._dim or (self.vectors.shape[1] if self.vectors is not None and self.vectors.ndim >= 2 else 8)
         return np.zeros(d, dtype=np.float32)
 
     # ---- Insertion (multi-layer) ----
 
     def insert(self, vector: np.ndarray, node_id: int) -> None:
-        """Insert a new vector into the HNSW multi-layer graph.
+        """Insert a vector into the multi-layer HNSW graph.
 
-        Steps (following the standard HNSW insertion algorithm from Malkov & Yashunin 2018):
-        1. Normalize the vector to L2 length 1
-        2. Draw a random level for the new node
-        3. If new level > current max_level, update max_level and set the new node
-           as the entry point at the new top level
-        4. Greedy descent from entry_point through layers (highest -> 1):
-           at each level, consider the current node + its neighbors at that level,
-           pick the top 'ef_construction' candidates by cosine similarity,
-           move to the best one
-        5. After descent to level 0, the "current node" is the entry point at bottom
-        6. At each level l = 1..new_level:
-           - Gather candidates: the entry node + its neighbors at this level
-           - Pick the M nearest by cosine similarity to the new vector
-           - Set the new node's adjacency at this level to these M neighbors
-           - Rewire: add the new node to each of the M neighbors' adjacency lists
-        7. At level 0:
-           - Gather candidates: the descent entry node + its level-0 neighbors
-           - Pick M nearest by cosine similarity
-           - Set the new node's level-0 adjacency
-           - Rewire level-0 neighbors
+        Standard insertion (Malkov & Yashunin):
+        1. Normalise the vector and draw a random level.
+        2. Greedily descend from the entry point to the new node's top level.
+        3. For each level from min(new_level, max_level) down to 0:
+             - run a best-first search (SEARCH-LAYER) to find the ef_construction
+               nearest candidates,
+             - pick the M nearest as neighbours, link bidirectionally,
+             - prune neighbours that exceed M links.
+        4. If the new node is taller than the entry point, it becomes the entry point.
 
-        The key heuristic: at each level, we consider a larger candidate pool
-        (ef_construction) than the M we keep, which creates a more well-connected
-        graph than just picking M from the immediate neighbors.
+        Linking to a *searched* candidate set (not just the entry point's
+        immediate neighbours) is what keeps the graph connected.
         """
-        # Step 1: normalize
         vec = np.asarray(vector, dtype=np.float32)
         norm = np.linalg.norm(vec)
         if norm > 0:
             vec = vec / norm
+        if self._dim is None:
+            self._dim = int(vec.shape[0])
 
-        # Step 2: random level
         new_level = self._random_level()
-
-        # Create the new node
         new_node = HNSWNode(vec, node_id, new_level)
 
-        # Step 3: grow max_level if needed
-        if new_level > self._max_level:
-            self._max_level = new_level
-            self.entry_point = node_id
-            # New node becomes entry point at the new top level
-            if new_level > 0:
-                new_node.adj[new_level] = []  # no neighbors yet at this level
-
-        # Ensure entry point is set even on the first insert (new_level == 0)
+        # First node becomes the entry point.
         if self.entry_point is None:
             self.entry_point = node_id
-
-        # Step 4: greedy descent from entry_point through layers
-        # We descend from _max_level down to 1
-        # At each level, we consider ef_construction candidates and pick the best
-        current_id = self.entry_point
-
-        for level in range(self._max_level, 0, -1):
-            # Get neighbors of current_id at this level
-            neighbors = self._get_neighbors_at_level(current_id, level)
-            # Candidates: current node + its neighbors
-            candidates = [current_id] + (neighbors if neighbors else [])
-
-            # Compute cosine similarity to vec for each candidate
-            scored: list[tuple[float, int]] = []
-            for cid in candidates:
-                sim = self._cosine_similarity(vec, self._get_vector(cid))
-                scored.append((sim, cid))
-
-            # Sort descending and keep top 'ef_construction'
-            scored.sort(key=lambda x: x[0], reverse=True)
-            top_candidates = [cid for _, cid in scored[: self.ef_construction]]
-
-            # Move to the best candidate among the top ef_construction
-            if top_candidates:
-                current_id = top_candidates[0]
-
-        # After the loop, current_id is the node at level 0 reached during descent
-        # Step 5: connect at each level from 1 to new_level
-        ep = self.entry_point
-        # Ensure entry point has adj entries for all needed levels
-        for lvl in range(1, max(new_level, self._max_level) + 1):
-            if ep is not None and ep in self.nodes:
-                if self.nodes[ep].adj[lvl] is None:
-                    self.nodes[ep].adj[lvl] = []
-
-        for lvl in range(1, new_level + 1):
-            # Gather candidates: entry point + its neighbors at this level
-            if ep is not None and ep in self.nodes:
-                neighbors_at_lvl = self._get_neighbors_at_level(ep, lvl)
-            else:
-                neighbors_at_lvl = []
-
-            candidates = [ep] + (neighbors_at_lvl if neighbors_at_lvl else [])
-
-            # Compute similarity to new vector
-            scored: list[tuple[float, int]] = []
-            for cid in candidates:
-                sim = self._cosine_similarity(vec, self._get_vector(cid))
-                scored.append((sim, cid))
-
-            # Sort descending, keep top M
-            scored.sort(key=lambda x: x[0], reverse=True)
-            top_M_ids = [cid for _, cid in scored[: self.M]]
-
-            # Set new node's adjacency at this level
-            new_node.adj[lvl] = top_M_ids
-
-            # Rewire: add new node to each of the top-M neighbors' adjacency
-            for nid in top_M_ids:
-                if nid in self.nodes:
-                    neighbor_node = self.nodes[nid]
-                    if neighbor_node.adj[lvl] is None:
-                        neighbor_node.adj[lvl] = []
-                    if node_id not in neighbor_node.adj[lvl]:
-                        neighbor_node.adj[lvl].append(node_id)
-
-        # Also connect at level 0
-        level_0_neighbors = self._get_neighbors_at_level(current_id, 0)
-        level0_candidates = [current_id] + (level_0_neighbors if level_0_neighbors else [])
-
-        scored0: list[tuple[float, int]] = []
-        for cid in level0_candidates:
-            sim = self._cosine_similarity(vec, self._get_vector(cid))
-            scored0.append((sim, cid))
-
-        scored0.sort(key=lambda x: x[0], reverse=True)
-        top_M_ids_0 = [cid for _, cid in scored0[: self.M]]
-
-        new_node.adj[0] = top_M_ids_0
-
-        # Rewire level-0 neighbors
-        for nid in top_M_ids_0:
-            if nid in self.nodes:
-                neighbor_node = self.nodes[nid]
-                if neighbor_node.adj[0] is None:
-                    neighbor_node.adj[0] = []
-                if node_id not in neighbor_node.adj[0]:
-                    neighbor_node.adj[0].append(node_id)
-
-        # Step 6: add the new node to the index
-        self.nodes[node_id] = new_node
-
-        # Update vectors array
-        if self.vectors is None:
+            self._max_level = new_level
+            self.nodes[node_id] = new_node
             self.vectors = vec.reshape(1, -1)
-        else:
-            self.vectors = np.vstack([self.vectors, vec])
+            return
 
-        # Update entry_point if this new node has a higher level
+        # Greedy descent from the current entry point down to the new node's level.
+        ep = self.entry_point
+        for level in range(self._max_level, new_level, -1):
+            ep = self._greedy_descend(vec, ep, level)
+
+        # Connect at each level the new node participates in.
+        for level in range(min(new_level, self._max_level), -1, -1):
+            candidates = self._search_layer(vec, ep, self.ef_construction, level)
+            neighbors = self._select_neighbors(vec, candidates, self.M)
+            if neighbors:
+                new_node.adj[level] = list(neighbors)
+                for nid in neighbors:
+                    self._link(nid, node_id, level)
+                ep = candidates[0][1]
+
+        self.nodes[node_id] = new_node
+        self.vectors = vec.reshape(1, -1) if self.vectors is None else np.vstack([self.vectors, vec])
+
         if new_level > self._max_level:
-            # This shouldn't happen since we already updated _max_level, but be safe
             self._max_level = new_level
             self.entry_point = node_id
+
+    def _link(self, src: int, dst: int, level: int) -> None:
+        """Add a link src->dst at `level`, pruning src back to M neighbours."""
+        src_node = self.nodes[src]
+        if src_node.adj[level] is None:
+            src_node.adj[level] = []
+        if dst not in src_node.adj[level]:
+            src_node.adj[level].append(dst)
+        if len(src_node.adj[level]) > self.M:
+            vec = self._get_vector(src)
+            candidates = [(self._cosine_similarity(vec, self._get_vector(n)), n) for n in src_node.adj[level]]
+            src_node.adj[level] = self._select_neighbors(vec, candidates, self.M)
+
+    def _select_neighbors(self, base_vec: np.ndarray, candidates: list[tuple[float, int]], m: int) -> list[int]:
+        """Select up to `m` neighbours using the HNSW diversity heuristic.
+
+        A candidate is kept only if it is closer to `base_vec` than to any
+        already-selected neighbour. This avoids the "everything connects to the
+        same few hubs" clustering that hurts reachability; a simple M-nearest
+        rule would leave the graph fragmented.
+        """
+        ordered = sorted(candidates, key=lambda x: -x[0])
+        selected: list[int] = []
+        for sim, nid in ordered:
+            if len(selected) >= m:
+                break
+            nvec = self._get_vector(nid)
+            if all(self._cosine_similarity(nvec, self._get_vector(s)) < sim for s in selected):
+                selected.append(nid)
+        # Backfill with the closest remaining if the heuristic was too strict.
+        if len(selected) < m:
+            for _, nid in ordered:
+                if nid not in selected:
+                    selected.append(nid)
+                    if len(selected) >= m:
+                        break
+        return selected
 
     # ---- Search (multi-layer with ef parameter) ----
 
     def search(self, query_vector: np.ndarray, k: int = 10, ef: int | None = None) -> np.ndarray:
-        """Search for k nearest neighbors using the multi-layer HNSW graph.
+        """Search for k nearest neighbours using the multi-layer HNSW graph.
 
-        Algorithm:
-        1. Start at entry_point at the highest level (_max_level)
-        2. For each level from _max_level down to 1:
-           - Among the current node + its neighbors at this level,
-             pick the single best neighbor by cosine similarity to the query
-           - Move to that neighbor
-           This descent uses the graph structure to quickly home in on
-           the right region of the space. At each higher level, we get
-           long-range jumps; at level 0, we have fine-grained locality.
-        3. At level 0, after descent, collect candidates from the vicinity:
-           the final node + its level-0 neighbors.
-           Consider up to 'ef' candidates total.
-        4. Return the top-k from the collected candidates.
+        Standard HNSW search:
+        1. Greedy descent from the entry point through the upper layers
+           (level = max_level .. 1), moving to the closest neighbour at each step.
+        2. Best-first (beam) search confined to layer 0, bounded by `ef`.
+        3. Return the top-k from the beam.
 
-        The `ef` parameter controls the candidate list size at level 0:
-        - Larger ef -> considers more candidates -> better recall but slower
-        - Smaller ef -> faster search but potentially lower recall
-        Typical values: ef=40 for demo, ef=100+ for production-quality recall.
-
-        Important: we pick the single best neighbor at each level during descent,
-        and only use the ef parameter at level 0 for the final candidate pool.
-        This is the standard HNSW search algorithm.
+        `ef` is the beam width at layer 0: larger ef -> higher recall, slower.
         """
         if len(self.nodes) == 0:
             return np.array([], dtype=np.int64)
 
-        # Normalize query vector
         q = np.asarray(query_vector, dtype=np.float32)
         norm = np.linalg.norm(q)
         if norm > 0:
             q = q / norm
 
-        # Step 1: descent from entry_point through upper layers
-        # At each level, pick the single best neighbor (current node + neighbors)
-        # by cosine similarity to the query, and move to it.
-        # This is the core of HNSW's efficiency - we use the graph structure
-        # to skip large portions of the search space.
+        search_ef = max(k, ef if ef is not None else self.ef_search)
+
+        # 1. greedy descent through the upper layers
         current_id = self.entry_point
-
         for level in range(self._max_level, 0, -1):
-            neighbors = self._get_neighbors_at_level(current_id, level)
-            if not neighbors:
-                # No neighbors at this level; stay at current node
-                continue
+            current_id = self._greedy_descend(q, current_id, level)
 
-            # Find the best neighbor by cosine similarity to query q
-            best_id = current_id
-            best_sim = self._cosine_similarity(q, self._get_vector(current_id))
+        # 2. best-first beam search at layer 0
+        beam = self._search_layer(q, current_id, search_ef, level=0)
 
-            for nid in neighbors:
+        # 3. top-k
+        result = [nid for _, nid in beam[:k]]
+        return np.array(result, dtype=np.int64)
+
+    def _greedy_descend(self, q: np.ndarray, entry_id: int, level: int) -> int:
+        """Repeatedly move to the closest neighbour at `level` until no improvement."""
+        current = entry_id
+        current_sim = self._cosine_similarity(q, self._get_vector(current))
+        improved = True
+        while improved:
+            improved = False
+            for nid in self._get_neighbors_at_level(current, level):
                 sim = self._cosine_similarity(q, self._get_vector(nid))
-                if sim > best_sim:
-                    best_sim = sim
-                    best_id = nid
+                if sim > current_sim:
+                    current, current_sim = nid, sim
+                    improved = True
+        return current
 
-            # Move to the best neighbor (or stay if none is better)
-            if best_id != current_id:
-                current_id = best_id
-            # If no neighbor is better, we stay and descend to the next level
+    def _search_layer(self, q: np.ndarray, entry_id: int, ef: int, level: int) -> list[tuple[float, int]]:
+        """Best-first search within one layer, keeping the `ef` best candidates.
 
-        # Step 2: at level 0, collect candidates from the vicinity
-        # of the final current_id node
-        # Gather: the node itself + its level-0 neighbors
-        initial_ids: list[int] = [current_id]
-        neighbors_0 = self._get_neighbors_at_level(current_id, 0)
-        initial_ids.extend(neighbors_0 if neighbors_0 else [])
+        Returns a list of (similarity, node_id) sorted by descending similarity.
+        """
+        import heapq
 
-        # Compute similarities for all initial candidates
-        scored: list[tuple[float, int]] = []
-        for cid in initial_ids:
-            sim = self._cosine_similarity(q, self._get_vector(cid))
-            scored.append((sim, cid))
+        visited = {entry_id}
+        entry_sim = self._cosine_similarity(q, self._get_vector(entry_id))
+        # candidates: max-heap by similarity (explore the closest first)
+        candidates: list[tuple[float, int]] = [(-entry_sim, entry_id)]
+        # results: min-heap by similarity (so the worst is at the top for eviction)
+        results: list[tuple[float, int]] = [(entry_sim, entry_id)]
 
-        # Sort descending by similarity
-        scored.sort(key=lambda x: x[0], reverse=True)
+        while candidates:
+            neg_sim, cid = heapq.heappop(candidates)
+            sim = -neg_sim
+            # stop if the closest unexpanded candidate is worse than our worst result
+            if len(results) >= ef and sim < results[0][0]:
+                break
+            for nid in self._get_neighbors_at_level(cid, level):
+                if nid in visited:
+                    continue
+                visited.add(nid)
+                nsim = self._cosine_similarity(q, self._get_vector(nid))
+                if len(results) < ef or nsim > results[0][0]:
+                    heapq.heappush(candidates, (-nsim, nid))
+                    heapq.heappush(results, (nsim, nid))
+                    if len(results) > ef:
+                        heapq.heappop(results)  # evict the worst
 
-        # Take top 'ef' candidates (use provided ef or self.ef_search)
-        search_ef = ef if ef is not None else self.ef_search
-        candidates = scored[:search_ef]
-
-        # Step 3: return top-k
-        top_k = min(k, len(candidates))
-        result_indices = np.array([cid for _, cid in candidates[:top_k]], dtype=np.int64)
-        return result_indices
+        return sorted(results, key=lambda x: -x[0])
 
     # ---- Neighbor access helpers ----
 

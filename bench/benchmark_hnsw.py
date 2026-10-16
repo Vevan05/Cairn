@@ -82,8 +82,8 @@ def main() -> None:
         bf_topk_sets.append(set(bf_indices.tolist()))
 
     # Build HNSW index once
-    print(f"Building HNSW index (M=16, ef_construction=40)...")
-    index = HNSW(M=16, ef_construction=40)
+    print(f"Building HNSW index (M=32, ef_construction=200)...")
+    index = HNSW(M=32, ef_construction=200)
     for i in range(len(vectors)):
         index.insert(vectors[i], i)
     print(f"Index built: {index.size()} nodes, max_level={index._max_level}\n")
@@ -100,9 +100,9 @@ def main() -> None:
 
         # Search each query vector with this efSearch
         for i, qv in enumerate(query_vectors):
-            # HNSW search with ef parameter
+            # HNSW search with this efSearch
             start = time.perf_counter()
-            hnsw_indices = index.search(qv, k=k)  # index has internal ef_search state
+            hnsw_indices = index.search(qv, k=k, ef=ef)
             hnsw_time = (time.perf_counter() - start) * 1000  # ms
 
             total_time += hnsw_time
@@ -122,9 +122,11 @@ def main() -> None:
 
     print("\n=== Benchmark complete ===")
     print("Observations:")
-    print("- Higher efSearch -> better recall but slower queries")
-    print("- HNSW provides significant speedup over brute force (especially at lower efSearch)")
-    print("- The recall/latency tradeoff is the key parameter tuning knob")
+    print("- HNSW recall@10 is high (~0.98) on corpus queries at M=32, ef_construction=200")
+    print("- At ~600 vectors, HNSW latency is comparable to brute force: pure-Python graph")
+    print("  traversal overhead dominates; the win appears at 10k+ vectors where brute")
+    print("  force is O(N) per query. See Plan.md: report speedup vs brute force at scale.")
+    print("- efSearch trades recall against latency; larger ef -> higher recall, slower")
 
 
 if __name__ == "__main__":
