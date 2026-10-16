@@ -1,72 +1,201 @@
 # Cairn
 
-A from-scratch RAG search engine with a built-in A/B experimentation platform.
-Pure-Python retrieval (no vector-DB dependency), a React UI, and a free-tier deploy path.
+A retrieval-augmented search engine with a from-scratch vector index and an integrated A/B experimentation platform.
 
-**Status:** feature-complete — every phase of the build plan implemented and tested (**36 tests passing**).
+Cairn implements its own approximate-nearest-neighbour index (HNSW), keyword index (BM25), hybrid rank fusion, and scalar quantization in pure Python, then layers a statistically grounded experimentation framework on top. The system is designed to be deployable on free-tier infrastructure without a managed vector database.
 
 ---
 
-## What it does
+## Table of contents
 
-Cairn answers two questions:
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Key results](#key-results)
+- [Components](#components)
+- [API reference](#api-reference)
+- [Experimentation framework](#experimentation-framework)
+- [Offline evaluation](#offline-evaluation)
+- [Benchmarks](#benchmarks)
+- [Testing](#testing)
+- [Local development](#local-development)
+- [Deployment](#deployment)
+- [Repository structure](#repository-structure)
+- [Limitations and future work](#limitations-and-future-work)
+- [License](#license)
 
-1. **Retrieval** — given a query, which stored passages are most relevant? (HNSW + BM25 + RRF fusion, no external vector DB)
-2. **Experimentation** — which retrieval configuration is *statistically* better? (deterministic bucketing, z-tests, Sample Ratio Mismatch detection)
+---
 
-The UI has four tabs:
+## Overview
 
-| Tab | What it does |
+The project addresses two problems:
+
+1. **Retrieval.** Given a query, identify the most relevant passages from a corpus. Cairn implements the retrieval stack directly — HNSW graph search, BM25 ranking, Reciprocal Rank Fusion, and int8 quantization — rather than depending on an external vector database.
+
+2. **Measurement.** Determine, with statistical confidence, which retrieval configuration performs better. Cairn provides deterministic user bucketing, two-proportion and Welch's t-tests, Sample Ratio Mismatch detection, idempotent event logging, and an offline evaluation harness.
+
+The application exposes four views:
+
+| View | Function |
 |---|---|
-| **Search** | Ranks the closest corpus passages by cosine similarity, with a per-result score + confidence bar. No LLM. |
-| **Answer** | Streams a cited answer token-by-token; clicking a citation highlights and scrolls to its source chunk. |
-| **Experiments** | A/B dashboard **and admin console** — create/activate/pause/delete experiments, edit variants and auto-balanced weights, run a traffic simulator, read z-tests + SRM. |
-| **Eval** | Offline eval harness — score vector vs hybrid on a labeled set with recall@k, MRR, nDCG@k. |
+| Search | Ranked corpus passages by cosine similarity, with per-result score and confidence. No language model involved. |
+| Answer | A streamed, citation-grounded answer; selecting a citation highlights the corresponding source passage. |
+| Experiments | A/B dashboard and administration console: create, activate, pause, and delete experiments; edit variants and weights; generate traffic; inspect hypothesis tests and SRM status. |
+| Eval | Offline evaluation of retrieval configurations against a labelled set (recall@k, MRR, nDCG@k). |
 
-Plus a **landing page** at `/` and a **docs page** at `/docs` (how to simulate experiments).
+A public landing page is served at `/` and a documentation page at `/docs`.
 
 ---
 
-## Results
+## Architecture
+
+The system separates an **offline indexing path** from an **online serving path**.
+
+**Offline path** (executed once, on a workstation or in CI):
+
+```
+documents → chunking → embedding (384-dim) → index artifacts (JSONL + NPY)
+```
+
+**Online path** (per request):
+
+```
+query → variant assignment → retrieval (vector and/or BM25) → rank fusion
+      → results → outcome logging → aggregate statistics
+```
+
+Retrieval and the experimentation framework reside in separate, dependency-free Python packages (`engine/` and `experiments/`) so that both are independently unit-testable and free of web-framework dependencies. The FastAPI application (`api/`) composes them, and the React frontend (`web/`) consumes the HTTP API.
+
+---
+
+## Key results
+
+All figures are reproducible from the scripts referenced in the final column. Corpus: 610 chunks, 384 dimensions.
 
 | Metric | Value | Source |
 |---|---|---|
-| int8 quantization memory | **0.89 MB → 0.22 MB** (**4×**) | `bench/benchmark_quantization.py` |
-| int8 vs float32, brute-force recall@10 | **60–80%** overlap | same |
-| int8 avg cosine similarity (dequantized) | **0.684** | same |
-| HNSW recall@10 (M=32, ef₍construction₎=200) | **~0.98** on corpus queries | `bench/benchmark_hnsw.py` |
-| HNSW query latency (610 vectors) | **~0.5 ms** (≈ brute force at this scale) | same |
-| Retrieval — vector: MRR / nDCG@10 | **0.855 / 0.890** | Eval tab / `/eval/run` |
-| Retrieval — hybrid: MRR / nDCG@10 | **0.975 / 0.982** | same |
-| Bucketing split (20k users, 50/50 config) | **49.41% / 50.59%** | `experiments/simulation.py` |
-| Cross-experiment bucket correlation | **+0.007** (want ~0) | same |
-| A/A false-positive rate (α = 0.05) | **4.3%** | same |
-| A/B detection power (+2pp, 3k/arm) | **0.73** (slightly underpowered) | same |
-| Full-experiment result | control **9.95%** vs treatment **12.73%** thumbs-up, **+27.9%** relative, z = −6.20 → *treatment better* | same |
-| SRM detection | 50/50 ok; 52/48, 60/40, 90/10 all flagged | same |
+| int8 quantization, memory | 0.89 MB → 0.22 MB (4×) | `bench/benchmark_quantization.py` |
+| int8 vs float32, brute-force recall@10 | 60–80% overlap | same |
+| int8 average cosine similarity (after dequantization) | 0.684 | same |
+| HNSW recall@10 (M=32, efConstruction=200) | ~0.98 | `bench/benchmark_hnsw.py` |
+| HNSW query latency (610 vectors) | ~0.5 ms | same |
+| Retrieval — vector: MRR / nDCG@10 | 0.855 / 0.890 | `/eval/run` |
+| Retrieval — hybrid: MRR / nDCG@10 | 0.975 / 0.982 | same |
+| Bucketing split (20,000 users, 50/50) | 49.41% / 50.59% | `experiments/simulation.py` |
+| Cross-experiment bucket correlation | +0.007 | same |
+| A/A false-positive rate (α = 0.05) | 4.3% | same |
+| A/B detection power (+2 pp, 3,000/arm) | 0.73 | same |
+| End-to-end experiment | control 9.95% vs treatment 12.73% thumbs-up; +27.9% relative; z = −6.20 | same |
+| SRM detection | 50/50 not flagged; 52/48, 60/40, 90/10 flagged | same |
 
-> At ~600 vectors, HNSW latency is comparable to brute force — pure-Python graph traversal overhead dominates. The win appears at 10k+ vectors, where brute force is O(N) per query (see Plan.md).
+At the current corpus size, HNSW latency is comparable to brute force, because pure-Python graph traversal overhead dominates; the asymptotic advantage is realised at corpus sizes above roughly 10,000 vectors.
 
 ---
 
 ## Components
 
-| Path | Role |
+| Path | Responsibility |
 |---|---|
-| `pipeline/` | chunking, sentence-transformers embeddings, artifact builder |
-| `engine/` | brute-force & HNSW NN, BM25, RRF fusion, int8 quantization (pure Python) |
-| `experiments/` | SHA-256 bucketing, z-test / Welch's t / χ² SRM, idempotent logging, simulations |
-| `eval/` | offline metrics (recall@k, MRR, nDCG) + labeled-set harness |
-| `api/` | FastAPI: `/health`, `/search`, `/answer(+/stream)`, `/events`, `/experiments` (+CRUD/+activate/+simulate), `/eval` |
-| `web/` | Vite + React + TypeScript + Tailwind UI |
-| `bench/` | reproducible benchmarks (HNSW, quantization, MRR/nDCG) |
-| `tests/` | pytest suite (36 tests) |
-| `scripts/` | `init_db.sql` for the Postgres schema |
-| `docs/` | `simulation.md` guide |
+| `pipeline/` | Corpus loading, chunking, embedding, and artifact generation. |
+| `engine/` | Brute-force and HNSW nearest-neighbour search, BM25, Reciprocal Rank Fusion, int8 quantization. Pure Python, no web dependencies. |
+| `experiments/` | Deterministic bucketing, hypothesis tests, SRM detection, idempotent logging, and simulation. Pure Python. |
+| `eval/` | Retrieval metrics (recall@k, MRR, nDCG) and the labelled-set harness. |
+| `api/` | FastAPI application, request/response models, and the language-model provider interface. |
+| `web/` | React, TypeScript, and Tailwind frontend built with Vite. |
+| `bench/` | Reproducible benchmark scripts. |
+| `tests/` | pytest suite (36 tests). |
+| `scripts/` | SQL schema for the production database. |
+| `docs/` | Design notes and the simulation guide. |
+
+### Retrieval engine
+
+- **HNSW.** A multi-layer proximity graph. Nodes receive a random level (`P(level ≥ k) = 0.5^k`); insertion searches each layer for candidate neighbours and applies the diversity heuristic from Malkov and Yashunin to maintain connectivity; search performs greedy descent through the upper layers followed by a best-first beam search (`efSearch`) at layer 0. The index supports persistence to disk.
+- **BM25.** An inverted index with document-length normalization and the standard `k1` and `b` parameters.
+- **Reciprocal Rank Fusion.** Combines vector and keyword rankings without requiring normalization across incompatible score scales.
+- **Int8 quantization.** Per-dimension scalar quantization with stored scales; reduces index memory by 4× at a measured cost of approximately 0.68 cosine similarity and 60–80% brute-force recall overlap.
 
 ---
 
-## Quick start
+## API reference
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/health` | Index version, vector count, chunk count. |
+| POST | `/search` | Assign a variant, retrieve ranked passages, log an exposure. |
+| POST | `/answer` | Retrieve and generate a cited answer (non-streaming). |
+| GET | `/answer/stream` | Server-Sent Events stream of retrieved chunks, answer tokens, and citations. |
+| POST | `/events` | Batched, idempotent outcome events. |
+| GET | `/experiments` | List experiments and the active experiment. |
+| GET | `/experiments/{id}` | Retrieve a single experiment. |
+| POST | `/experiments` | Create an experiment (validated). |
+| PATCH | `/experiments/{id}` | Update name, status, primary metric, or configuration. |
+| DELETE | `/experiments/{id}` | Delete an experiment. |
+| POST | `/experiments/{id}/activate` | Make an experiment the one serving traffic. |
+| POST | `/experiments/{id}/simulate` | Generate synthetic exposures and outcomes. |
+| GET | `/experiments/{id}/results` | Aggregate statistics, hypothesis test, SRM status, and verdict. |
+| GET/POST | `/eval/sets` | List or create labelled evaluation sets. |
+| POST | `/eval/sets/sample` | Create a corpus-derived sample set. |
+| POST | `/eval/run` | Score one or more retrieval configurations. |
+| GET | `/eval/runs` | Recent evaluation runs. |
+
+---
+
+## Experimentation framework
+
+Assignment is deterministic: `SHA-256(experiment_id + ":" + user_id) mod 10000`, mapped to variants by cumulative weight. A stable hash function is used deliberately — Python's built-in `hash()` is not stable across processes.
+
+Design properties:
+
+- **Active experiment.** Exactly one experiment serves traffic at a time. `POST /experiments/{id}/activate` switches it and pauses the previous one; newly created experiments remain idle until activated.
+- **User-scoped outcomes.** The unit of analysis is the user: at most one exposure and one vote per user per variant. This guarantees `outcomes ≤ exposures` and makes the thumbs-up rate a per-user proportion.
+- **Idempotent logging.** Events are keyed by a unique `event_id`; retries are no-ops.
+- **SRM detection.** A chi-square test compares observed variant counts with those expected from the configured weights. A flagged experiment is reported as untrustworthy.
+- **Traffic simulation.** `POST /experiments/{id}/simulate` generates synthetic users and routes them through the same bucketing, exposure, and outcome functions as live traffic, allowing experiments to be evaluated before sufficient real traffic exists. See `docs/simulation.md`.
+
+The framework can be exercised without the API:
+
+```bash
+PYTHONPATH=. python experiments/simulation.py
+```
+
+This reports bucketing validation, the A/A false-positive rate, A/B detection power, SRM cases, and a complete experiment.
+
+---
+
+## Offline evaluation
+
+The evaluation harness scores a retrieval configuration against a labelled set of `query → relevant chunk ids` pairs and reports recall@k, Mean Reciprocal Rank, and nDCG@k. A corpus-derived sample set can be generated from the UI; sets may also be supplied as JSON.
+
+```
+POST /eval/run  { "set_id": "...", "top_k": 10, "compare": ["vector", "hybrid"] }
+```
+
+On the sample set, hybrid retrieval improves MRR from 0.855 to 0.975 and nDCG@10 from 0.890 to 0.982 relative to vector-only retrieval.
+
+---
+
+## Benchmarks
+
+| Script | Measures |
+|---|---|
+| `bench/benchmark_engine.py` | Brute-force, BM25, and RRF correctness; int8 memory footprint. |
+| `bench/benchmark_hnsw.py` | HNSW recall@10 and latency across `efSearch`. |
+| `bench/benchmark_quantization.py` | float32 versus int8 recall and memory. |
+| `bench/benchmark_day9.py` | MRR@10 and nDCG@10 for vector, BM25, and hybrid retrieval. |
+| `bench/run_all_benchmarks.py` | Executes all of the above. |
+
+---
+
+## Testing
+
+```bash
+PYTHONPATH=. pytest -q       # 36 passing
+```
+
+Coverage spans the retrieval engine (brute force, BM25, RRF, quantization, HNSW, persistence), the experimentation primitives (bucketing, weight distribution, hypothesis tests, SRM), and the HTTP API (search, streaming, idempotent events, experiment lifecycle, activation routing, evaluation, simulation).
+
+---
+
+## Local development
 
 ### Backend
 
@@ -74,13 +203,11 @@ Plus a **landing page** at `/` and a **docs page** at `/docs` (how to simulate e
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# build the offline index (first run downloads a small corpus + embedding model)
-bash build.sh                       # writes data/chunks.jsonl + data/vectors.npy
-
-# run API
+bash build.sh                       # generates data/chunks.jsonl and data/vectors.npy
 PYTHONPATH=. uvicorn api.main:app --port 8000
-# interactive docs: http://localhost:8000/docs
 ```
+
+Interactive API documentation is available at `http://localhost:8000/docs`.
 
 ### Frontend
 
@@ -90,106 +217,46 @@ npm install
 npm run dev                         # http://localhost:5173
 ```
 
-Vite proxies `/search`, `/answer`, `/events`, `/health`, `/experiments`, `/eval` to the backend on `:8000`.
+The Vite development server proxies `/search`, `/answer`, `/events`, `/health`, `/experiments`, and `/eval` to the backend on port 8000.
 
-### Tests
+---
 
-```bash
-PYTHONPATH=. pytest -q              # 36 passing
+## Deployment
+
+The system targets free-tier infrastructure:
+
+- `render.yaml` — Render free web service and free PostgreSQL; the build step installs dependencies and runs `build.sh`.
+- `vercel.json` — static frontend hosting (Vercel or Cloudflare Pages) with SPA fallback and API rewrites.
+- `scripts/init_db.sql` — PostgreSQL schema for experiments, variants, exposures, outcomes, and results.
+
+Set `VITE_API_URL` at frontend build time to target the deployed API. Replacing `StubProvider` in `api/llm_provider.py` with a free-tier language-model provider enables real answer generation.
+
+---
+
+## Repository structure
+
+```
+engine/        retrieval engine (HNSW, BM25, RRF, quantization); no web dependencies
+pipeline/      chunking, embedding, and artifact generation
+experiments/   bucketing, hypothesis tests, SRM, simulation
+eval/          retrieval metrics and the labelled-set harness
+api/           FastAPI application and language-model provider
+web/           React + TypeScript + Tailwind frontend
+bench/         reproducible benchmark scripts
+scripts/       database schema
+tests/         pytest suite
+docs/          design notes and simulation guide
+data/          generated artifacts (git-ignored)
 ```
 
 ---
 
-## Try it
+## Limitations and future work
 
-The corpus is a Wikipedia sample, so ask about what's actually in it:
-
-```bash
-curl -s -X POST http://localhost:8000/search \
-  -H 'Content-Type: application/json' \
-  -d '{"query":"Zrínyi battleship","user_id":"u1"}'
-```
-
-Questions about the corpus (Valkyria Chronicles III, Egyptian deities, Zrínyi, Zapata, gold dollar, aircraft) retrieve well. Off-topic questions return low similarity scores (~0.2) — which the UI surfaces as low confidence rather than a confident wrong answer.
-
----
-
-## Experimentation
-
-Each `/search` call assigns a variant via `SHA-256(experiment_id + ":" + user_id) % 10000` and logs an exposure. Thumbs up/down post to `/events` as outcomes. `GET /experiments/{id}/results` computes the stats.
-
-- **Active experiment** — only one experiment serves traffic at a time; `POST /experiments/{id}/activate` switches it (and pauses the previous).
-- **User-scoped outcomes** — the unit of analysis is the user: one exposure and at most one vote per user per variant, so `outcomes ≤ exposures` always holds.
-- **Admin console** — create/pause/delete experiments with server-side validation (≥ 2 variants, unique names, positive weights). Splits auto-balance to 100 (typing 70 sets the other to 30).
-- **Traffic simulator** — `POST /experiments/{id}/simulate` fills an experiment with synthetic users so the z-test and SRM checks actually run (see below).
-
-See the layer run end-to-end:
-
-```bash
-PYTHONPATH=. python experiments/simulation.py
-```
-
-Prints bucketing validation, an A/A false-positive check (≈ α), A/B detection power, SRM cases, and a full experiment table.
-
-### Simulating traffic
-
-The admin console has a **Simulate traffic** row (users + lift). It generates distinct users, buckets each with the real hashing function, and logs exposures + thumbs with a configurable lift — through the same helpers as live traffic. Full guide: [`docs/simulation.md`](docs/simulation.md) or `/docs` in the app.
-
-```bash
-curl -s -X POST localhost:8000/experiments/demo/simulate \
-  -H 'Content-Type: application/json' \
-  -d '{"n_users":1000,"treatment_lift":0.10,"seed":1}'
-```
-
----
-
-## Offline evaluation
-
-The Eval tab scores any config on a labeled set (`question → relevant chunk ids`) and returns a recall@k / MRR / nDCG@k table for **vector vs hybrid**. Seed a corpus-derived sample set from the UI, or paste your own JSON.
-
-API: `GET /eval/sets`, `POST /eval/sets`, `POST /eval/sets/sample`, `POST /eval/run`, `GET /eval/runs`.
-
----
-
-## Benchmarks
-
-| Script | Measures |
-|---|---|
-| `bench/benchmark_engine.py` | brute-force / BM25 / RRF sanity + int8 memory |
-| `bench/benchmark_hnsw.py` | HNSW recall@10 and latency across `efSearch` |
-| `bench/benchmark_quantization.py` | float32 vs int8 recall + memory trade-off |
-| `bench/benchmark_day9.py` | MRR@10, nDCG@10 — vector vs BM25 vs RRF hybrid |
-| `bench/run_all_benchmarks.py` | runs them all |
-
----
-
-## Deployment (free tier)
-
-- `render.yaml` — Render free web service + free Postgres; build runs `pip install` + `bash build.sh`.
-- `vercel.json` — static frontend (Vercel/Cloudflare Pages) with SPA fallback + API rewrites.
-- `scripts/init_db.sql` — Postgres schema for experiments, variants, exposures, outcomes, results.
-
-Set `VITE_API_URL` on the frontend build to point at the deployed API. Swap `StubProvider` in `api/llm_provider.py` for any free-tier LLM to make `/answer` real.
-
-> A scheduled stats job (GitHub Actions cron reading exposures and writing the `results` table) is a planned addition — the schema and stats functions are ready, but no workflow is committed yet.
-
----
-
-## Layout
-
-```
-/engine        pure-Python retrieval (no web deps)
-/pipeline      chunking, embedding, artifact builder
-/experiments   bucketing, stats, SRM, simulations
-/eval          offline metrics + labeled-set harness
-/api           FastAPI wiring + LLM provider
-/web           Vite + React + TS + Tailwind frontend
-/bench         reproducible benchmark scripts
-/scripts       DB schema
-/tests         pytest suite
-/docs          design notes + simulation guide
-/data          gitignored, produced by build.sh
-```
+- **Answer generation.** The `/answer` endpoint currently uses a deterministic stub provider. The provider interface is in place; a real model can be substituted without API changes.
+- **State.** Experiment definitions and events are held in memory. The PostgreSQL schema (`scripts/init_db.sql`) and the statistics functions are complete, but the persistence layer is not yet wired, and the scheduled statistics job is not implemented.
+- **HNSW performance.** At the current corpus size, latency is on par with brute force. Larger corpora are required to demonstrate the asymptotic advantage.
+- **Evaluation set.** The bundled evaluation set is corpus-derived and intended to demonstrate the harness; a hand-verified question set is required for publication-quality retrieval metrics.
 
 ---
 
