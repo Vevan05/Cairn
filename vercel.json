@@ -6,10 +6,13 @@
     { "source": "/api/:path*", "destination": "https://cairn-api.onrender.com/:path*" },
     { "source": "/health", "destination": "https://cairn-api.onrender.com/health" },
     { "source": "/search", "destination": "https://cairn-api.onrender.com/search" },
+    { "source": "/answer/:path*", "destination": "https://cairn-api.onrender.com/answer/:path*" },
     { "source": "/answer", "destination": "https://cairn-api.onrender.com/answer" },
     { "source": "/events", "destination": "https://cairn-api.onrender.com/events" },
     { "source": "/experiments", "destination": "https://cairn-api.onrender.com/experiments" },
     { "source": "/experiments/:path*", "destination": "https://cairn-api.onrender.com/experiments/:path*" },
+    { "source": "/eval", "destination": "https://cairn-api.onrender.com/eval" },
+    { "source": "/eval/:path*", "destination": "https://cairn-api.onrender.com/eval/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

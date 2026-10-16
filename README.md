@@ -3,7 +3,7 @@
 A from-scratch RAG search engine with a built-in A/B experimentation platform.
 Pure-Python retrieval (no vector-DB dependency), a React UI, and a free-tier deploy path.
 
-**Status:** feature-complete scaffold — every phase of the build plan implemented and tested (26 tests passing).
+**Status:** feature-complete scaffold — every phase of the build plan implemented and tested (33 tests passing).
 
 ---
 
@@ -14,15 +14,16 @@ Cairn answers two questions:
 1. **Retrieval** — given a query, which stored passages are most relevant? (HNSW + BM25 + RRF fusion, no external vector DB)
 2. **Experimentation** — which retrieval configuration is *statistically* better? (deterministic bucketing, z-tests, Sample Ratio Mismatch detection)
 
-The UI has three tabs:
+The UI has four tabs:
 
 | Tab | What it does |
 |---|---|
 | **Search** | Ranks the closest corpus passages by cosine similarity. No LLM. |
-| **Answer** | Retrieves passages, then generates a cited answer via an LLM provider. |
-| **Experiments** | Live A/B dashboard: per-variant rates, z-test, lift, SRM flag, verdict. |
+| **Answer** | Streams a cited answer token-by-token; clicking a citation highlights its source chunk. |
+| **Experiments** | A/B dashboard **and admin console** — create/pause/delete experiments, edit variants and weights, read z-tests + SRM. |
+| **Eval** | Offline eval harness — score vector vs hybrid on a labeled set with recall@k, MRR, nDCG@k. |
 
-Plus a **landing page** at `/`.
+Plus a **landing page** at `/` and a **docs page** at `/docs` (how to simulate experiments).
 
 ---
 
@@ -33,7 +34,8 @@ Plus a **landing page** at `/`.
 | `pipeline/` | chunking, sentence-transformers embeddings, artifact builder |
 | `engine/` | brute-force & HNSW NN, BM25, RRF fusion, int8 quantization (pure Python) |
 | `experiments/` | SHA-256 bucketing, z-test / Welch's t / χ² SRM, idempotent logging, simulations |
-| `api/` | FastAPI: `/health`, `/search`, `/answer`, `/events`, `/experiments`, `/experiments/{id}/results` |
+| `eval/` | offline metrics (recall@k, MRR, nDCG) + labeled-set harness |
+| `api/` | FastAPI: `/health`, `/search`, `/answer(+/stream)`, `/events`, `/experiments` (+CRUD), `/eval` |
 | `web/` | Vite + React + TypeScript + Tailwind UI |
 | `bench/` | reproducible benchmarks (HNSW, quantization, MRR/nDCG) |
 | `tests/` | pytest suite (engine, experiments, API integration) |
@@ -70,7 +72,7 @@ Vite proxies `/search`, `/answer`, `/events`, `/health`, `/experiments` to the b
 ### Tests
 
 ```bash
-PYTHONPATH=. pytest -q              # 26 passing
+PYTHONPATH=. pytest -q              # 33 passing
 ```
 
 ---
@@ -101,6 +103,12 @@ PYTHONPATH=. python experiments/simulation.py
 
 Prints bucketing validation, an A/A false-positive check (≈ α), A/B detection power, SRM cases, and a full experiment table.
 
+### Admin console
+The Experiments tab can create, pause, update, and delete experiments (variants, weights, retrieval config), with server-side validation (≥2 variants, unique names, positive weights).
+
+### Offline evaluation
+The Eval tab scores any config on a labeled set (`question → relevant chunk ids`) and returns a recall@k / MRR / nDCG@k table for **vector vs hybrid**. Seed a corpus-derived sample set from the UI, or paste your own JSON. API: `POST /eval/sets`, `POST /eval/sets/sample`, `POST /eval/run`.
+
 ---
 
 ## Benchmarks
@@ -120,9 +128,10 @@ Prints bucketing validation, an A/A false-positive check (≈ α), A/B detection
 - `render.yaml` — Render free web service + free Postgres; build runs `pip install` + `bash build.sh`.
 - `vercel.json` — static frontend (Vercel/Cloudflare Pages) with SPA fallback + API rewrites.
 - `scripts/init_db.sql` — Postgres schema for experiments, variants, exposures, outcomes, results.
-- `.github/workflows/stats.yml` — nightly stats job skeleton.
 
 Set `VITE_API_URL` on the frontend build to point at the deployed API. Swap `StubProvider` in `api/llm_provider.py` for any free-tier LLM to make `/answer` real.
+
+> A scheduled stats job (GitHub Actions cron reading exposures and writing the `results` table) is a planned addition — the schema and stats functions are ready, but no workflow is committed yet.
 
 ---
 
@@ -137,6 +146,7 @@ Set `VITE_API_URL` on the frontend build to point at the deployed API. Swap `Stu
 /bench         reproducible benchmark scripts
 /scripts       DB schema
 /tests         pytest suite
+/docs          design notes + simulation guide (docs/simulation.md)
 /data          gitignored, produced by build.sh
 ```
 
