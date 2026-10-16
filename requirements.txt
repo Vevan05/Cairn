@@ -1,5 +1,6 @@
 numpy
 sentence-transformers
+datasets
 fastapi
 uvicorn[standard]
 psycopg[binary]
