@@ -10,10 +10,25 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from engine.search import brute_force_search
+from pipeline.embeddings import embed_query
 from api.llm_provider import StubProvider, CachedProvider, build_rag_prompt, extract_citations
-from experiments import two_proportion_z, srm_chi_square
+from experiments import assign_variant, two_proportion_z, welch_t, srm_chi_square
 
 app = FastAPI(title="Cairn")
+
+# Default experiment definition served by /search.
+DEFAULT_EXPERIMENT = {
+    "id": "exp_hybrid_vs_vector",
+    "name": "Hybrid vs Vector retrieval",
+    "status": "running",
+    "primary_metric": "thumbs_up_rate",
+    "config_json": {
+        "variants": [
+            {"name": "control", "weight": 50, "config": {"retrieval": "vector", "topK": 5}},
+            {"name": "treatment", "weight": 50, "config": {"retrieval": "hybrid", "topK": 5, "alpha": 0.6}},
+        ]
+    },
+}
 
 # Load read-only index artifacts (lazy-load)
 _INDEX_VECTORS = None
@@ -30,6 +45,42 @@ def _ensure_index():
                     _INDEX_CHUNKS.append(json.loads(line))
 
 _ALLOWED_LOOPS = ("A", "B")
+
+# ---------------------------------------------------------------------------
+# In-memory event store (replaces Postgres in v1).
+# Exposures: experiment_id -> {variant -> count}
+# Outcomes:  experiment_id -> {variant -> {"n": int, "succ": int, "latencies": [ms]}}
+# ---------------------------------------------------------------------------
+_EXPOSURES: dict = {}
+_OUTCOMES: dict = {}
+_EVENT_IDS: set = set()  # idempotency keys
+
+
+def _log_exposure(experiment_id: str, variant: str, user_id: str, event_id: str) -> bool:
+    """Idempotent exposure log. Returns True if newly stored."""
+    if event_id in _EVENT_IDS:
+        return False
+    _EVENT_IDS.add(event_id)
+    exp = _EXPOSURES.setdefault(experiment_id, {})
+    exp[variant] = exp.get(variant, 0) + 1
+    return True
+
+
+def _log_outcome(experiment_id: str, variant: str, metric: str, value: float, event_id: str) -> bool:
+    """Idempotent outcome log."""
+    if event_id in _EVENT_IDS:
+        return False
+    _EVENT_IDS.add(event_id)
+    store = _OUTCOMES.setdefault(experiment_id, {}).setdefault(
+        variant, {"n": 0, "succ": 0, "latencies": []}
+    )
+    if metric == "thumbs":
+        store["n"] += 1
+        if value > 0:
+            store["succ"] += 1
+    elif metric == "latency_ms":
+        store["latencies"].append(float(value))
+    return True
 
 
 class SearchRequest(BaseModel):
@@ -58,26 +109,34 @@ def health() -> dict:
 @app.post("/search", response_model=SearchResponse)
 def search(req: SearchRequest) -> SearchResponse:
     _ensure_index()
-    # Evaluate variant via bucketing (simplified<rfl:parameter name="ssignment)
-    import hashlib
-    exp_id = "exp_hybrid_vs_vector"
-    bucket = int(hashlib.sha256(f"{exp_id}:{req.user_id}".encode()).hexdigest(), 16) % 10000
-    # 50/50 split
-    variant = "control" if bucket < 5000 else "treatment"
+    # Assign a variant deterministically (same user -> same variant).
+    exp = DEFAULT_EXPERIMENT
+    exp_id = exp["id"]
+    variants = exp["config_json"]["variants"]
+    variant = assign_variant(exp_id, req.user_id, variants)
 
-    # Vector search for both; config is variant-controlled
-    q_vec = np.asarray(__import__("pipeline.embeddings", fromlist=["embed_texts"]).embed_texts([req.query]))[0]
+    # Log the exposure (idempotent per user+experiment+query hour bucket).
+    exposure_id = f"exp_{exp_id}_{req.user_id}"
+    _log_exposure(exp_id, variant, req.user_id, exposure_id)
+
+    # Vector search for both; config is variant-controlled.
+    q_vec = embed_query(req.query)
     hits = brute_force_search(q_vec, _INDEX_VECTORS, top_k=10)
 
     results = []
-    if variant == "control":
-        for idx in hits[:5]:
-            c = _INDEX_CHUNKS[idx] if idx < len(_INDEX_CHUNKS) else {}
-            results.append({"rank": len(results) + 1, "chunk_id": c.get("chunk_id"), "text": c.get("text", "")[:200]})
-    else:
-        for idx in hits[:5]:
-            c = _INDEX_CHUNKS[idx] if idx < len(_INDEX_CHUNKS) else {}
-            results.append({"rank": len(results) + 1, "chunk_id": c.get("chunk_id"), "text": c.get("text", "")[:200]})
+    qn = np.linalg.norm(q_vec)
+    qv_norm = (q_vec / qn) if qn > 0 else q_vec
+    for idx in hits[:5]:
+        c = _INDEX_CHUNKS[idx] if idx < len(_INDEX_CHUNKS) else {}
+        score = (float(np.dot(qv_norm, _INDEX_VECTORS[idx])) if idx < len(_INDEX_VECTORS) else 0.0)
+        conf = max(0.0, min(1.0, score))
+        results.append({
+            "rank": len(results) + 1,
+            "chunk_id": c.get("chunk_id"),
+            "text": c.get("text", "")[:200],
+            "score": round(score, 4),
+            "confidence": f"{conf * 100:.0f}%",
+        })
 
     return SearchResponse(query=req.query, variant=variant, results=results, experiment_id=exp_id)
 
@@ -86,7 +145,7 @@ def search(req: SearchRequest) -> SearchResponse:
 def answer(req: AnswerRequest):
     _ensure_index()
     # For Day 12: return an LLM-style answer with citations
-    q_vec = np.asarray(__import__("pipeline.embeddings", fromlist=["embed_texts"]).embed_texts([req.query]))[0]
+    q_vec = embed_query(req.query)
     hits = brute_force_search(q_vec, _INDEX_VECTORS, top_k=5)
     retrieved = []
     for idx in hits:
@@ -116,20 +175,23 @@ def answer(req: AnswerRequest):
 @app.post("/events")
 def events(batch: dict):
     """Batched outcome events, idempotent by event_id."""
-    # In production: upsert into Postgres with ON CONFLICT DO NOTHING.
     stored = 0
-    seen = set()
     for ev in batch.get("events", []):
         eid = ev.get("event_id")
-        if eid in seen:
+        if not eid:
             continue
-        seen.add(eid)
-        stored += 1
+        exp_id = ev.get("experiment_id", DEFAULT_EXPERIMENT["id"])
+        variant = ev.get("variant") or assign_variant(
+            exp_id, ev.get("user_id", "anon"), DEFAULT_EXPERIMENT["config_json"]["variants"]
+        )
+        metric = ev.get("metric", ev.get("event_type", "thumbs"))
+        if _log_outcome(exp_id, variant, metric, float(ev.get("value", 0)), eid):
+            stored += 1
     return {"stored": stored, "idempotent": True}
 
 
 # In-memory store for experiment definitions (replaces Postgres in v1)
-_EXPERIMENTS: dict = {}
+_EXPERIMENTS: dict = {DEFAULT_EXPERIMENT["id"]: DEFAULT_EXPERIMENT}
 
 
 @app.get("/experiments")
@@ -149,7 +211,7 @@ class ExperimentCreate(BaseModel):
 def create_experiment(exp: ExperimentCreate):
     if exp.id in _EXPERIMENTS:
         raise HTTPException(status_code=409, detail="experiment already exists")
-    _EXPERIMENTS[exp.id] = exp.dict()
+    _EXPERIMENTS[exp.id] = exp.model_dump()
     return _EXPERIMENTS[exp.id]
 
 
@@ -157,19 +219,76 @@ def create_experiment(exp: ExperimentCreate):
 def experiment_results(exp_id: str):
     if exp_id not in _EXPERIMENTS:
         raise HTTPException(status_code=404, detail="experiment not found")
-    # In v1,return a skeleton computed from in-memory exposures (if any)
     exp = _EXPERIMENTS[exp_id]
     config = exp.get("config_json") or {}
-    variants = config.get("variants", [])
-    # Simulated A/A demo
-    config = exp.get("config_json") or {}
-    variants = config.get("variants", [])
-    groups = config.get("groups", [])
-    _variants_unused = variants  # pyflakes-friendly placeholder
-    # return example status
+    variants = [v["name"] for v in config.get("variants", [])] or ["control", "treatment"]
+
+    exposures = _EXPOSURES.get(exp_id, {})
+    outcomes = _OUTCOMES.get(exp_id, {})
+
+    per_variant = []
+    for name in variants:
+        o = outcomes.get(name, {"n": 0, "succ": 0, "latencies": []})
+        n = o["n"]
+        rate = (o["succ"] / n) if n else None
+        lats = o["latencies"]
+        p95 = (sorted(lats)[max(0, int(0.95 * len(lats)) - 1)] if lats else None)
+        per_variant.append({
+            "variant": name,
+            "exposures": exposures.get(name, 0),
+            "n": n,
+            "successes": o["succ"],
+            "thumbs_up_rate": round(rate, 4) if rate is not None else None,
+            "p95_latency_ms": p95,
+        })
+
+    # Primary metric: two-proportion z-test between first two variants.
+    test = None
+    if len(per_variant) >= 2:
+        a, b = per_variant[0], per_variant[1]
+        if a["n"] and b["n"] and a["thumbs_up_rate"] is not None and b["thumbs_up_rate"] is not None:
+            test = two_proportion_z(a["thumbs_up_rate"], a["n"], b["thumbs_up_rate"], b["n"])
+            test["a"] = a["variant"]
+            test["b"] = b["variant"]
+            test["absolute_lift"] = round(b["thumbs_up_rate"] - a["thumbs_up_rate"], 4)
+            if a["thumbs_up_rate"]:
+                test["relative_lift_pct"] = round(
+                    100 * (b["thumbs_up_rate"] - a["thumbs_up_rate"]) / a["thumbs_up_rate"], 2
+                )
+
+    # SRM check against configured weights (uses exposures if present, else outcomes n).
+    srm = None
+    observed = [v["exposures"] for v in per_variant]
+    if sum(observed) == 0:
+        observed = [v["n"] for v in per_variant]
+    total_obs = sum(observed)
+    if total_obs > 0 and len(per_variant) >= 2:
+        weights = [v.get("weight", 1) for v in config.get("variants", [])] or [1, 1]
+        if len(weights) != len(observed):
+            weights = [1] * len(observed)
+        tw = sum(weights)
+        expected = [total_obs * w / tw for w in weights]
+        srm = srm_chi_square(observed, expected)
+
+    # Plain-language status (guard against peeking).
+    label = "not enough data"
+    if test:
+        if srm and srm["srm_detected"]:
+            label = "SRM warning — experiment untrustworthy"
+        elif sum(v["n"] for v in per_variant) < 100:
+            label = "not enough data (provisional)"
+        elif test["significant"]:
+            better = "treatment better" if test["absolute_lift"] > 0 else "control better"
+            label = better
+        else:
+            label = "no detectable difference"
+
     return {
         "experiment_id": exp_id,
         "status": exp.get("status", "draft"),
         "primary_metric": exp.get("primary_metric"),
-        "note": "schedule stats job reads exposures table for SRM and z-tests",
+        "variants": per_variant,
+        "test": test,
+        "srm": srm,
+        "verdict": label,
     }

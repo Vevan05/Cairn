@@ -24,15 +24,15 @@ def test_search_basic():
 
 def test_events_idempotent():
     payload = {"events": [
-        {"event_id": "e1", "variant": "control", "user_id": "u", "event_type": "thumbs", "value": 1},
+        {"event_id": "e1", "variant": "control", "user_id": "u", "metric": "thumbs", "value": 1},
     ]}
     r1 = client.post("/events", json=payload)
     r2 = client.post("/events", json=payload)
     assert r1.status_code == 200
     assert r2.status_code == 200
-    # both should report stored exactly once for the single unique id
+    # first write stores 1; retry of the same event_id is a no-op
     assert r1.json()["stored"] == 1
-    assert r2.json()["stored"] == 1
+    assert r2.json()["stored"] == 0
 
 
 def test_create_and_list_experiments():

@@ -1,7 +1,15 @@
 {
-  "buildCommand": "npm run build",
-  "outputDirectory": "web/build",
+  "version": 2,
+  "buildCommand": "npm --prefix web run build",
+  "outputDirectory": "web/dist",
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://cairn-api.onrender.com/:path*" }
+    { "source": "/api/:path*", "destination": "https://cairn-api.onrender.com/:path*" },
+    { "source": "/health", "destination": "https://cairn-api.onrender.com/health" },
+    { "source": "/search", "destination": "https://cairn-api.onrender.com/search" },
+    { "source": "/answer", "destination": "https://cairn-api.onrender.com/answer" },
+    { "source": "/events", "destination": "https://cairn-api.onrender.com/events" },
+    { "source": "/experiments", "destination": "https://cairn-api.onrender.com/experiments" },
+    { "source": "/experiments/:path*", "destination": "https://cairn-api.onrender.com/experiments/:path*" },
+    { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
