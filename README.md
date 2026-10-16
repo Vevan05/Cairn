@@ -4,7 +4,6 @@ A retrieval-augmented search engine with a from-scratch vector index and an inte
 
 Cairn implements its own approximate-nearest-neighbour index (HNSW), keyword index (BM25), hybrid rank fusion, and scalar quantization in pure Python, then layers a statistically grounded experimentation framework on top. The system is designed to be deployable on free-tier infrastructure without a managed vector database.
 
----
 
 ## Table of contents
 
@@ -23,7 +22,6 @@ Cairn implements its own approximate-nearest-neighbour index (HNSW), keyword ind
 - [Limitations and future work](#limitations-and-future-work)
 - [License](#license)
 
----
 
 ## Overview
 
@@ -44,7 +42,6 @@ The application exposes four views:
 
 A public landing page is served at `/` and a documentation page at `/docs`.
 
----
 
 ## Architecture
 
@@ -65,7 +62,6 @@ query → variant assignment → retrieval (vector and/or BM25) → rank fusion
 
 Retrieval and the experimentation framework reside in separate, dependency-free Python packages (`engine/` and `experiments/`) so that both are independently unit-testable and free of web-framework dependencies. The FastAPI application (`api/`) composes them, and the React frontend (`web/`) consumes the HTTP API.
 
----
 
 ## Key results
 
@@ -89,7 +85,6 @@ All figures are reproducible from the scripts referenced in the final column. Co
 
 At the current corpus size, HNSW latency is comparable to brute force, because pure-Python graph traversal overhead dominates; the asymptotic advantage is realised at corpus sizes above roughly 10,000 vectors.
 
----
 
 ## Components
 
@@ -113,7 +108,6 @@ At the current corpus size, HNSW latency is comparable to brute force, because p
 - **Reciprocal Rank Fusion.** Combines vector and keyword rankings without requiring normalization across incompatible score scales.
 - **Int8 quantization.** Per-dimension scalar quantization with stored scales; reduces index memory by 4× at a measured cost of approximately 0.68 cosine similarity and 60–80% brute-force recall overlap.
 
----
 
 ## API reference
 
@@ -137,7 +131,6 @@ At the current corpus size, HNSW latency is comparable to brute force, because p
 | POST | `/eval/run` | Score one or more retrieval configurations. |
 | GET | `/eval/runs` | Recent evaluation runs. |
 
----
 
 ## Experimentation framework
 
@@ -159,7 +152,6 @@ PYTHONPATH=. python experiments/simulation.py
 
 This reports bucketing validation, the A/A false-positive rate, A/B detection power, SRM cases, and a complete experiment.
 
----
 
 ## Offline evaluation
 
@@ -171,7 +163,6 @@ POST /eval/run  { "set_id": "...", "top_k": 10, "compare": ["vector", "hybrid"] 
 
 On the sample set, hybrid retrieval improves MRR from 0.855 to 0.975 and nDCG@10 from 0.890 to 0.982 relative to vector-only retrieval.
 
----
 
 ## Benchmarks
 
@@ -183,7 +174,6 @@ On the sample set, hybrid retrieval improves MRR from 0.855 to 0.975 and nDCG@10
 | `bench/benchmark_day9.py` | MRR@10 and nDCG@10 for vector, BM25, and hybrid retrieval. |
 | `bench/run_all_benchmarks.py` | Executes all of the above. |
 
----
 
 ## Testing
 
@@ -193,7 +183,6 @@ PYTHONPATH=. pytest -q       # 36 passing
 
 Coverage spans the retrieval engine (brute force, BM25, RRF, quantization, HNSW, persistence), the experimentation primitives (bucketing, weight distribution, hypothesis tests, SRM), and the HTTP API (search, streaming, idempotent events, experiment lifecycle, activation routing, evaluation, simulation).
 
----
 
 ## Local development
 
@@ -219,7 +208,6 @@ npm run dev                         # http://localhost:5173
 
 The Vite development server proxies `/search`, `/answer`, `/events`, `/health`, `/experiments`, and `/eval` to the backend on port 8000.
 
----
 
 ## Deployment
 
@@ -231,7 +219,6 @@ The system targets free-tier infrastructure:
 
 Set `VITE_API_URL` at frontend build time to target the deployed API. Replacing `StubProvider` in `api/llm_provider.py` with a free-tier language-model provider enables real answer generation.
 
----
 
 ## Repository structure
 
@@ -249,8 +236,6 @@ docs/          design notes and simulation guide
 data/          generated artifacts (git-ignored)
 ```
 
----
-
 ## Limitations and future work
 
 - **Answer generation.** The `/answer` endpoint currently uses a deterministic stub provider. The provider interface is in place; a real model can be substituted without API changes.
@@ -258,7 +243,6 @@ data/          generated artifacts (git-ignored)
 - **HNSW performance.** At the current corpus size, latency is on par with brute force. Larger corpora are required to demonstrate the asymptotic advantage.
 - **Evaluation set.** The bundled evaluation set is corpus-derived and intended to demonstrate the harness; a hand-verified question set is required for publication-quality retrieval metrics.
 
----
 
 ## License
 
