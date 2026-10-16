@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: cairn-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: cairn-db
+          property: connectionString
+databases:
+  - name: cairn-db
+    plan: free
+    databaseName: cairn
+    postgresMajorVersion: 15
