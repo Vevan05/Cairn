@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from engine.search import brute_force_search
 from api.llm_provider import StubProvider, CachedProvider, build_rag_prompt, extract_citations
+from experiments import two_proportion_z, srm_chi_square
 
 app = FastAPI(title="Cairn")
 
@@ -125,3 +126,50 @@ def events(batch: dict):
         seen.add(eid)
         stored += 1
     return {"stored": stored, "idempotent": True}
+
+
+# In-memory store for experiment definitions (replaces Postgres in v1)
+_EXPERIMENTS: dict = {}
+
+
+@app.get("/experiments")
+def list_experiments():
+    return {"experiments": list(_EXPERIMENTS.values())}
+
+
+class ExperimentCreate(BaseModel):
+    id: str
+    name: str
+    status: str = "draft"
+    config_json: dict | None = None
+    primary_metric: str | None = None
+
+
+@app.post("/experiments", status_code=201)
+def create_experiment(exp: ExperimentCreate):
+    if exp.id in _EXPERIMENTS:
+        raise HTTPException(status_code=409, detail="experiment already exists")
+    _EXPERIMENTS[exp.id] = exp.dict()
+    return _EXPERIMENTS[exp.id]
+
+
+@app.get("/experiments/{exp_id}/results")
+def experiment_results(exp_id: str):
+    if exp_id not in _EXPERIMENTS:
+        raise HTTPException(status_code=404, detail="experiment not found")
+    # In v1,return a skeleton computed from in-memory exposures (if any)
+    exp = _EXPERIMENTS[exp_id]
+    config = exp.get("config_json") or {}
+    variants = config.get("variants", [])
+    # Simulated A/A demo
+    config = exp.get("config_json") or {}
+    variants = config.get("variants", [])
+    groups = config.get("groups", [])
+    _variants_unused = variants  # pyflakes-friendly placeholder
+    # return example status
+    return {
+        "experiment_id": exp_id,
+        "status": exp.get("status", "draft"),
+        "primary_metric": exp.get("primary_metric"),
+        "note": "schedule stats job reads exposures table for SRM and z-tests",
+    }

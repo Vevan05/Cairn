@@ -96,7 +96,8 @@ class HNSW:
         """Return the vector for a node_id."""
         if self.vectors is not None and 0 <= node_id < self.vectors.shape[0]:
             return self.vectors[node_id]
-        return np.zeros(384, dtype=np.float32)
+        d = self.vectors.shape[1] if self.vectors is not None and self.vectors.ndim >= 2 else 8
+        return np.zeros(d, dtype=np.float32)
 
     # ---- Insertion (multi-layer) ----
 
