@@ -29,6 +29,8 @@ quantization_meta.json
 # ── Environment / secrets ───────────────────────────────
 .env*
 !.env.example
+# Non-secret build-time default for the frontend (the public API URL).
+!web/.env.production
 
 # ── OS / editors ────────────────────────────────────────
 .DS_Store

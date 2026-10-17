@@ -2,7 +2,20 @@
 
 html, body, #root { height: 100%; }
 
+/* Paint the root element to match the app background. Without this the browser
+   default (white) shows through when overscrolling past the page and in the
+   scrollbar gutter — particularly jarring in dark mode. */
+html {
+  background-color: var(--color-slate-50, #f8fafc); /* slate-50 */
+  color-scheme: light dark;                          /* dark scrollbars/controls in dark mode */
+}
+
+@media (prefers-color-scheme: dark) {
+  html { background-color: var(--color-slate-950, #020617); } /* slate-950 */
+}
+
 body {
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   margin: 0;
+  background-color: inherit;
 }

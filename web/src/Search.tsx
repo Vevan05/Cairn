@@ -48,12 +48,15 @@ export function Search() {
   const [rated, setRated] = useState<Record<string, 1 | -1>>({});
   const [toast, setToast] = useState('');
   const [online, setOnline] = useState<boolean | null>(null);
+  const [healthError, setHealthError] = useState('');
   const [view, setView] = useState<View>('search');
   const [highlighted, setHighlighted] = useState<string | null>(null);
   const chunksRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    api.health().then(() => setOnline(true)).catch(() => setOnline(false));
+    api.health()
+      .then(() => { setOnline(true); setHealthError(''); })
+      .catch((e) => { setOnline(false); setHealthError(String(e?.message ?? e)); });
   }, []);
 
   async function runSearch() {
@@ -140,7 +143,9 @@ export function Search() {
             {variant && (
               <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200 font-medium">{variant}</span>
             )}
-            <span className={`w-2 h-2 rounded-full ${online ? 'bg-green-500' : online === false ? 'bg-red-500' : 'bg-slate-400 animate-pulse'}`} />
+            <span
+              title={online === false ? `API unreachable: ${healthError}` : online ? 'API online' : 'Checking API…'}
+              className={`w-2 h-2 rounded-full ${online ? 'bg-green-500' : online === false ? 'bg-red-500' : 'bg-slate-400 animate-pulse'}`} />
             <input className="w-32 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1 text-xs"
               value={userId} onChange={e => setUserId(e.target.value)} placeholder="user_id" />
           </div>

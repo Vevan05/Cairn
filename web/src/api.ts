@@ -11,7 +11,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     try { const j = await res.json(); if (j?.detail) detail = j.detail; } catch { /* ignore */ }
     throw new Error(detail);
   }
-  return (await res.json()) as T;
+  const body = await res.text();
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    // Almost always means API_BASE is empty, so the request hit the static
+    // frontend, which answers unknown paths with index.html instead of JSON.
+    throw new Error(
+      `Expected JSON from ${API_BASE || location.origin}${path} but got ` +
+      `${res.headers.get('content-type') ?? 'a non-JSON body'}.` +
+      (API_BASE ? '' : ' Set VITE_API_URL to the deployed API URL and redeploy.'),
+    );
+  }
 }
 
 function post<T>(path: string, data: Record<string, unknown>): Promise<T> {
@@ -86,6 +97,13 @@ export async function streamAnswer(query: string, userId: string, handlers: Stre
   try {
     const res = await fetch(url);
     if (!res.ok || !res.body) throw new Error(`${res.status} ${res.statusText}`);
+    const ctype = res.headers.get('content-type') ?? '';
+    if (!ctype.includes('text/event-stream')) {
+      throw new Error(
+        `Expected an event stream from ${API_BASE || location.origin}/answer/stream but got ${ctype}.` +
+        (API_BASE ? '' : ' Set VITE_API_URL to the deployed API URL and redeploy.'),
+      );
+    }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
