@@ -1,0 +1,12 @@
+# Top-level DEV / BUILD dependencies (hand-edited).
+#
+# requirements-dev.txt is compiled from this file — do not edit it by hand:
+#   uv pip compile --python-version 3.12 requirements-dev.in -o requirements-dev.txt
+#
+# `datasets` is only needed to (re)build the corpus with build.sh; the deploy
+# ships precomputed artifacts (data/chunks.jsonl, data/vectors.npy).
+# `httpx` is required by fastapi's TestClient.
+-r requirements.in
+datasets
+pytest
+httpx

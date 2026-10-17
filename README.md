@@ -18,6 +18,7 @@ Cairn implements its own approximate-nearest-neighbour index (HNSW), keyword ind
 - [Benchmarks](#benchmarks)
 - [Testing](#testing)
 - [Local development](#local-development)
+  - [Dependencies](#dependencies)
 - [Deployment](#deployment)
 - [Repository structure](#repository-structure)
 - [Engineering notes](#engineering-notes)
@@ -105,9 +106,11 @@ HNSW recall responds to `efSearch` as expected: **0.68 → 0.96 → 1.00** at `e
 | `api/` | FastAPI application, request/response models, and the language-model provider interface. |
 | `web/` | React, TypeScript, and Tailwind frontend built with Vite. |
 | `bench/` | Reproducible benchmark scripts. |
-| `tests/` | pytest suite (36 tests). |
+| `tests/` | pytest suite (42 tests). |
 | `scripts/` | PostgreSQL schema for future persistence (not required to run). |
 | `docs/` | Design notes and the simulation guide. |
+
+Dependency locks live at the repo root: `requirements.in` → `requirements.txt` (runtime) and `requirements-dev.in` → `requirements-dev.txt` (dev), compiled for Python 3.12 with `uv pip compile` — see [Dependencies](#dependencies).
 
 ### Retrieval engine
 
@@ -204,7 +207,7 @@ The Answer view labels this in the UI itself with a **"Demo mode · templated an
 
 ```bash
 pip install -r requirements-dev.txt
-PYTHONPATH=. pytest -q       # 36 passing
+PYTHONPATH=. pytest -q       # 42 passing
 ```
 
 Coverage spans the retrieval engine (brute force, BM25, RRF, quantization, HNSW, persistence), the evaluation harness (recall@k, MRR, nDCG for vector / BM25 / hybrid), the experimentation primitives (bucketing, weight distribution, hypothesis tests, SRM), and the HTTP API (search, streaming, idempotent events, experiment lifecycle, activation routing, evaluation, simulation).
@@ -223,6 +226,24 @@ PYTHONPATH=. uvicorn api.main:app --port 8000
 ```
 
 The committed corpus artifacts mean `pip install -r requirements.txt` (runtime only) is enough to serve; `requirements-dev.txt` is only needed to rebuild the corpus or run the tests/benchmarks.
+
+### Dependencies
+
+Dependency versions are fully locked, **including transitives**, so the deploy resolves identically every time:
+
+| Hand-edited | Compiled lock | Contents |
+|---|---|---|
+| `requirements.in` | `requirements.txt` | runtime only (42 packages) |
+| `requirements-dev.in` | `requirements-dev.txt` | runtime + datasets/pytest/httpx (62 packages) |
+
+Never edit the `.txt` files by hand — regenerate them with [`uv`](https://docs.astral.sh/uv/) (`pip install uv`). Locks are compiled **for the deploy interpreter, Python 3.12**:
+
+```bash
+uv pip compile --python-version 3.12 requirements.in     -o requirements.txt
+uv pip compile --python-version 3.12 requirements-dev.in -o requirements-dev.txt
+```
+
+This is also why `datasets` and `pytest` stay out of the runtime lock: `render.yaml` installs only `requirements.txt`, keeping the free-tier build small and its memory footprint low.
 
 Interactive API documentation is available at `http://localhost:8000/docs`.
 

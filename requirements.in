@@ -1,0 +1,11 @@
+# Top-level RUNTIME dependencies (hand-edited).
+#
+# requirements.txt is compiled from this file — do not edit it by hand:
+#   uv pip compile --python-version 3.12 requirements.in -o requirements.txt
+#
+# Deliberately excludes PyTorch/transformers: the ONNX embedding path keeps the
+# process under ~400 MB, which matters on a 512 MB free-tier instance.
+fastapi
+uvicorn[standard]
+numpy
+fastembed
