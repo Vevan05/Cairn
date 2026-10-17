@@ -263,7 +263,15 @@ The Vite development server proxies `/search`, `/answer`, `/events`, `/health`, 
 Sized to run within a free tier — Render **512 MB / 0.1 CPU** for the API plus Vercel/Cloudflare static hosting for the frontend:
 
 - `render.yaml` — Render free web service. The build only runs `pip install` plus a one-time prefetch of the ONNX embedding model; the corpus artifacts (`data/chunks.jsonl`, `data/vectors.npy`) are committed, so **no corpus embedding happens at deploy time**. A `/health` check is configured, and `CORS_ORIGINS` sets the allowed frontend origin.
-- `vercel.json` — static frontend hosting with SPA fallback. Set **`VITE_API_URL`** to the deployed API URL at build time; the frontend then calls the API cross-origin and the backend sends CORS headers.
+- **Frontend (Vercel / Cloudflare Pages).** The app lives in `web/`. Pick **one** of these two setups — don't mix them:
+  - **Root Directory = `web`** (simplest). Vercel auto-detects Vite: install and build run inside `web/`, output `dist`. `web/vercel.json` adds the SPA fallback rewrite so `/app` and `/docs` resolve.
+  - **Root Directory = repo root.** Use the root `vercel.json`, which drives everything through `--prefix web` — including `installCommand`, without which `web/node_modules` is never installed and the build fails with `tsc: command not found`.
+
+  Either way, set **`VITE_API_URL`** to the deployed API URL in the project's environment variables; the frontend then calls the API cross-origin and the backend sends CORS headers. Clear any Build / Install / Output overrides in the dashboard so the Root Directory is only set in one place.
+
+> **Troubleshooting Vercel builds.**
+> - `ENOENT … web/web/package.json` → the Root Directory is `web` *and* a `--prefix web` build command is also set. Remove one.
+> - `tsc: command not found` (exit 127) → the install ran outside `web/`, so `web/node_modules` doesn't exist. Add `npm --prefix web install` (root config) or set the Root Directory to `web`.
 - `web/.env.example` documents the one frontend build-time variable (`VITE_API_URL`). Backend variables (`CORS_ORIGINS`, `DEMO_SEED_USERS`) are set on the host.
 - No database is required — experiment state is in memory (see Limitations).
 - **Answers** are produced by the deterministic stub, so no LLM key or external service is needed — see [Answer generation](#answer-generation).
