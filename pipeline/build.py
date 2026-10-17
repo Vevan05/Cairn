@@ -13,23 +13,30 @@ from pipeline.embeddings import embed_texts
 
 
 def load_corpus(max_docs: int) -> list[tuple[str, str]]:
+    """Load WikiText-2 paragraphs, skipping headings and blank lines.
+
+    WikiText-2 rows are individual lines, so "documents" are paragraphs. The
+    full train split yields ~14.3k paragraphs (~16.8k chunks) spanning ~600
+    articles. `max_docs <= 0` means "all".
+    """
     from datasets import load_dataset
 
     ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
+    limit = max_docs if max_docs > 0 else None
     docs: list[tuple[str, str]] = []
     for i, row in enumerate(ds):
         text = row["text"].strip()
         if len(text) < 200:  # skip headings/blank lines
             continue
         docs.append((f"doc{i}", text))
-        if len(docs) >= max_docs:
+        if limit is not None and len(docs) >= limit:
             break
     return docs
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--max-docs", type=int, default=500)
+    p.add_argument("--max-docs", type=int, default=0, help="max paragraphs to load (<=0 = all)")
     p.add_argument("--chunk-size", type=int, default=200)
     p.add_argument("--overlap", type=int, default=40)
     p.add_argument("--out", type=Path, default=Path("data"))

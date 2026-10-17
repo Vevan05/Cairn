@@ -15,8 +15,8 @@ from pathlib import Path
 import json
 
 
-def load_corpus(max_docs: int = 500) -> tuple:
-    """Load or build the corpus."""
+def load_corpus(max_docs: int = 0) -> tuple:
+    """Load the built corpus from data/, or rebuild it if missing (0 = all docs)."""
     data_path = Path("data")
     chunks = []
     vectors = None
@@ -34,13 +34,14 @@ def load_corpus(max_docs: int = 500) -> tuple:
         # Build from scratch
         import datasets
         ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
+        limit = max_docs if max_docs > 0 else None
         docs: list[tuple[str, str]] = []
         for i, row in enumerate(ds):
             text = row["text"].strip()
             if len(text) < 200:
                 continue
             docs.append((f"doc{i}", text))
-            if len(docs) >= max_docs:
+            if limit is not None and len(docs) >= limit:
                 break
 
         chunks = []
@@ -63,14 +64,16 @@ def main() -> None:
     print("=== HNSW Benchmark: Recall vs. Latency vs. efSearch ===\n")
 
     # Load / build corpus
-    chunks, vectors = load_corpus(max_docs=500)
+    chunks, vectors = load_corpus()
     print(f"Corpus: {len(chunks)} chunks, {vectors.shape[1]}-dim vectors\n")
 
-    # Use first 5 vectors as queries
-    query_vectors = vectors[:5]
+    # Use the first 20 vectors as queries
+    query_vectors = vectors[:20]
     k = 10  # top-k we care about
 
-    # Pre-compute brute-force top-k and times for each query
+    # Pre-compute brute-force top-k and times for each query.
+    # Warm up once so the first query isn't charged for lazy allocation.
+    brute_force_search(query_vectors[0], vectors, top_k=k)
     bf_topk_sets: list[set] = []
     bf_times_ms: list[float] = []
 
@@ -80,6 +83,8 @@ def main() -> None:
         bf_time = (time.perf_counter() - start) * 1000
         bf_times_ms.append(bf_time)
         bf_topk_sets.append(set(bf_indices.tolist()))
+
+    bf_avg_ms = sum(bf_times_ms) / len(bf_times_ms)
 
     # Build HNSW index once
     print(f"Building HNSW index (M=32, ef_construction=200)...")
@@ -116,16 +121,18 @@ def main() -> None:
         avg_time = total_time / len(query_vectors)
         avg_recall = total_recall / len(query_vectors)
         # Speedup factor: how many times faster HNSW is than brute force
-        speedup = bf_times_ms[0] / avg_time if avg_time > 0 else 0
+        # (compared against the mean brute-force time, not a cold first sample).
+        speedup = bf_avg_ms / avg_time if avg_time > 0 else 0
 
         print(f"{ef:>10} | {avg_recall:>9.3f} | {avg_time:>15.1f} | {speedup:>12.1f}x")
 
     print("\n=== Benchmark complete ===")
     print("Observations:")
-    print("- HNSW recall@10 is high (~0.98) on corpus queries at M=32, ef_construction=200")
-    print("- At ~600 vectors, HNSW latency is comparable to brute force: pure-Python graph")
-    print("  traversal overhead dominates; the win appears at 10k+ vectors where brute")
-    print("  force is O(N) per query. See Plan.md: report speedup vs brute force at scale.")
+    print(f"- HNSW recall@10 on corpus queries at M=32, ef_construction=200 (N={len(vectors)})")
+    print("- Below ~5k vectors, HNSW is at parity with brute force: a vectorised NumPy")
+    print("  matmul is a high bar and pure-Python graph traversal costs ~1 ms/query.")
+    print("  Above that, brute force grows O(N) while HNSW stays near-flat, so the")
+    print("  speedup widens with corpus size.")
     print("- efSearch trades recall against latency; larger ef -> higher recall, slower")
 
 

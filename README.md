@@ -53,6 +53,8 @@ The system separates an **offline indexing path** from an **online serving path*
 documents → chunking → embedding (384-dim) → index artifacts (JSONL + NPY)
 ```
 
+The shipped index is built from the full WikiText-2 train split: 14,324 paragraphs across 629 articles, chunked to 16,770 passages.
+
 **Online path** (per request):
 
 ```
@@ -65,17 +67,19 @@ Retrieval and the experimentation framework reside in separate, dependency-free 
 
 ## Key results
 
-All figures are reproducible from the scripts referenced in the final column. Corpus: 610 chunks, 384 dimensions.
+All figures are reproducible from the scripts referenced in the final column. Corpus: **16,770 chunks** (14,324 WikiText-2 paragraphs across 629 articles), 384 dimensions.
 
 | Metric | Value | Source |
 |---|---|---|
-| int8 quantization, memory | 0.89 MB → 0.22 MB (4×) | `bench/benchmark_quantization.py` |
-| int8 vs float32, brute-force recall@10 | 60–80% overlap | same |
-| int8 average cosine similarity (after dequantization) | 0.684 | same |
-| HNSW recall@10 (M=32, efConstruction=200) | ~0.98 | `bench/benchmark_hnsw.py` |
-| HNSW query latency (610 vectors) | ~0.5 ms | same |
-| Retrieval — vector: MRR / nDCG@10 | 0.855 / 0.890 | `/eval/run` |
-| Retrieval — hybrid: MRR / nDCG@10 | 0.975 / 0.982 | same |
+| int8 quantization, memory | 24.6 MB → 6.1 MB (4×) | `bench/benchmark_quantization.py` |
+| int8 average cosine similarity (after dequantization) | 0.504 | same |
+| int8 vs float32, brute-force recall@10 | 50–60% overlap | same |
+| HNSW recall@10 (M=32, efConstruction=200) | 0.70 | `bench/benchmark_hnsw.py` |
+| HNSW query latency (16,770 vectors) | ~0.9 ms | same |
+| HNSW speedup vs brute force | ~3.7× | same |
+| Retrieval — vector: recall@10 / MRR / nDCG@10 | 0.920 / 0.771 / 0.808 | `bench/benchmark_day9.py` |
+| Retrieval — BM25: recall@10 / MRR / nDCG@10 | 1.000 / 0.985 / 0.989 | same |
+| Retrieval — hybrid: recall@10 / MRR / nDCG@10 | 1.000 / 0.892 / 0.919 | same |
 | Bucketing split (20,000 users, 50/50) | 49.41% / 50.59% | `experiments/simulation.py` |
 | Cross-experiment bucket correlation | +0.007 | same |
 | A/A false-positive rate (α = 0.05) | 4.3% | same |
@@ -83,14 +87,14 @@ All figures are reproducible from the scripts referenced in the final column. Co
 | End-to-end experiment | control 9.95% vs treatment 12.73% thumbs-up; +27.9% relative; z = −6.20 | same |
 | SRM detection | 50/50 not flagged; 52/48, 60/40, 90/10 flagged | same |
 
-At the current corpus size, HNSW latency is comparable to brute force, because pure-Python graph traversal overhead dominates; the asymptotic advantage is realised at corpus sizes above roughly 10,000 vectors.
+At 16,770 vectors HNSW is ~3.7× faster than brute force, and the gap widens with corpus size: brute force is O(N) per query while HNSW is roughly flat. Recall is an explicit trade-off — brute force is exact, whereas HNSW gives up roughly 30% of the top-10 for the speedup. Raising `M` or `efConstruction` improves recall at the cost of build time.
 
 
 ## Components
 
 | Path | Responsibility |
 |---|---|
-| `pipeline/` | Corpus loading, chunking, embedding, and artifact generation. |
+| `pipeline/` | WikiText-2 loading, word-window chunking (200 words, 40-word overlap), embedding, and artifact generation. |
 | `engine/` | Brute-force and HNSW nearest-neighbour search, BM25, Reciprocal Rank Fusion, int8 quantization. Pure Python, no web dependencies. |
 | `experiments/` | Deterministic bucketing, hypothesis tests, SRM detection, idempotent logging, and simulation. Pure Python. |
 | `eval/` | Retrieval metrics (recall@k, MRR, nDCG) and the labelled-set harness. |
@@ -106,7 +110,7 @@ At the current corpus size, HNSW latency is comparable to brute force, because p
 - **HNSW.** A multi-layer proximity graph. Nodes receive a random level (`P(level ≥ k) = 0.5^k`); insertion searches each layer for candidate neighbours and applies the diversity heuristic from Malkov and Yashunin to maintain connectivity; search performs greedy descent through the upper layers followed by a best-first beam search (`efSearch`) at layer 0. The index supports persistence to disk.
 - **BM25.** An inverted index with document-length normalization and the standard `k1` and `b` parameters.
 - **Reciprocal Rank Fusion.** Combines vector and keyword rankings without requiring normalization across incompatible score scales.
-- **Int8 quantization.** Per-dimension scalar quantization with stored scales; reduces index memory by 4× at a measured cost of approximately 0.68 cosine similarity and 60–80% brute-force recall overlap.
+- **Int8 quantization.** Per-dimension scalar quantization with stored scales; reduces index memory by 4× (24.6 MB → 6.1 MB at 16,770 chunks) at a measured cost of 0.504 average cosine similarity and 50–60% brute-force recall overlap.
 
 
 ## API reference
@@ -158,10 +162,10 @@ This reports bucketing validation, the A/A false-positive rate, A/B detection po
 The evaluation harness scores a retrieval configuration against a labelled set of `query → relevant chunk ids` pairs and reports recall@k, Mean Reciprocal Rank, and nDCG@k. A corpus-derived sample set can be generated from the UI; sets may also be supplied as JSON.
 
 ```
-POST /eval/run  { "set_id": "...", "top_k": 10, "compare": ["vector", "hybrid"] }
+POST /eval/run  { "set_id": "...", "top_k": 10, "compare": ["vector", "bm25", "hybrid"] }
 ```
 
-On the sample set, hybrid retrieval improves MRR from 0.855 to 0.975 and nDCG@10 from 0.890 to 0.982 relative to vector-only retrieval.
+On the bundled 100-query corpus-derived set, vector retrieval scores recall@10 0.920 / MRR 0.771 / nDCG@10 0.808, while hybrid fusion scores 1.000 / 0.892 / 0.919. BM25 alone is strongest on this particular set (1.000 / 0.985 / 0.989), because each query reuses rare terms from its source chunk — a property of corpus-derived queries rather than a general result. Supported configs are `vector`, `bm25`, and `hybrid`.
 
 
 ## Benchmarks
@@ -169,7 +173,7 @@ On the sample set, hybrid retrieval improves MRR from 0.855 to 0.975 and nDCG@10
 | Script | Measures |
 |---|---|
 | `bench/benchmark_engine.py` | Brute-force, BM25, and RRF correctness; int8 memory footprint. |
-| `bench/benchmark_hnsw.py` | HNSW recall@10 and latency across `efSearch`. |
+| `bench/benchmark_hnsw.py` | HNSW recall@10, latency, and brute-force speedup across `efSearch`. |
 | `bench/benchmark_quantization.py` | float32 versus int8 recall and memory. |
 | `bench/benchmark_day9.py` | MRR@10 and nDCG@10 for vector, BM25, and hybrid retrieval. |
 | `bench/run_all_benchmarks.py` | Executes all of the above. |
@@ -181,7 +185,7 @@ On the sample set, hybrid retrieval improves MRR from 0.855 to 0.975 and nDCG@10
 PYTHONPATH=. pytest -q       # 36 passing
 ```
 
-Coverage spans the retrieval engine (brute force, BM25, RRF, quantization, HNSW, persistence), the experimentation primitives (bucketing, weight distribution, hypothesis tests, SRM), and the HTTP API (search, streaming, idempotent events, experiment lifecycle, activation routing, evaluation, simulation).
+Coverage spans the retrieval engine (brute force, BM25, RRF, quantization, HNSW, persistence), the evaluation harness (recall@k, MRR, nDCG for vector / BM25 / hybrid), the experimentation primitives (bucketing, weight distribution, hypothesis tests, SRM), and the HTTP API (search, streaming, idempotent events, experiment lifecycle, activation routing, evaluation, simulation).
 
 
 ## Local development
@@ -192,7 +196,7 @@ Coverage spans the retrieval engine (brute force, BM25, RRF, quantization, HNSW,
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-bash build.sh                       # generates data/chunks.jsonl and data/vectors.npy
+bash build.sh                       # generates data/chunks.jsonl and data/vectors.npy (~16.8k chunks, several minutes)
 PYTHONPATH=. uvicorn api.main:app --port 8000
 ```
 
@@ -219,6 +223,8 @@ The system targets free-tier infrastructure:
 
 Set `VITE_API_URL` at frontend build time to target the deployed API. Replacing `StubProvider` in `api/llm_provider.py` with a free-tier language-model provider enables real answer generation.
 
+> **Build time.** `data/` is git-ignored and regenerated by `build.sh`, which now embeds the full ~16.8k-chunk corpus. That takes several minutes on a workstation and considerably longer on a free-tier builder. For a snappier free deploy, ship precomputed artifacts (the 6.1 MB int8 vectors plus `chunks.jsonl`) instead of embedding at deploy time, or lower `--max-docs` in `build.sh`.
+
 
 ## Repository structure
 
@@ -240,7 +246,7 @@ data/          generated artifacts (git-ignored)
 
 - **Answer generation.** The `/answer` endpoint currently uses a deterministic stub provider. The provider interface is in place; a real model can be substituted without API changes.
 - **State.** Experiment definitions and events are held in memory. The PostgreSQL schema (`scripts/init_db.sql`) and the statistics functions are complete, but the persistence layer is not yet wired, and the scheduled statistics job is not implemented.
-- **HNSW performance.** At the current corpus size, latency is on par with brute force. Larger corpora are required to demonstrate the asymptotic advantage.
+- **HNSW performance.** On 16,770 vectors HNSW is clearly faster than brute force, but the index is pure Python: the graph build takes several minutes at this size and latency is ~1 ms/query. At larger corpora the index should be persisted and loaded rather than rebuilt on every deploy.
 - **Evaluation set.** The bundled evaluation set is corpus-derived and intended to demonstrate the harness; a hand-verified question set is required for publication-quality retrieval metrics.
 
 

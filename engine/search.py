@@ -70,21 +70,23 @@ class BM25:
         self.doc_lengths: np.ndarray = np.zeros(self.N, dtype=np.int64)
         self.avg_doc_len: float = 0.0
         self._term_doc_freq: dict[str, int] = defaultdict(int)  # df per term
-        self._postings: dict[str, list[int]] = defaultdict(list)  # doc_ids for each term
+        # term -> [(doc_idx, term_frequency_in_doc)]. Storing the frequency at
+        # build time avoids re-tokenizing a whole document per posting at query
+        # time (which made search O(postings * doc_length)).
+        self._postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
         self._build()
 
     def _build(self):
         for di, doc in enumerate(self.documents):
             tokens = _tokenize(doc)
             self.doc_lengths[di] = len(tokens)
-            # Use a set per document to count df once per doc
-            seen: set[str] = set()
+            # Compute per-document term frequencies once.
+            tf: dict[str, int] = {}
             for tok in tokens:
-                if tok in seen:
-                    continue
-                seen.add(tok)
+                tf[tok] = tf.get(tok, 0) + 1
+            for tok, freq in tf.items():
                 self._term_doc_freq[tok] += 1
-                self._postings[tok].append(di)
+                self._postings[tok].append((di, freq))
 
         # Average document length
         if self.N > 0:
@@ -102,10 +104,9 @@ class BM25:
             df = self._term_doc_freq.get(tok, 0)
             idf = log((self.N - df + 0.5) / (df + 0.5) + 1.0)  # +1 smoothing
 
-            for di in self._postings.get(tok, []):
+            for di, freq in self._postings.get(tok, []):
                 doc_len = self.doc_lengths[di]
                 # BM25 component for this term in this doc
-                freq = self._term_freq_in_doc(tok, di)
                 numerator = freq * (self.k1 + 1)
                 denominator = freq + self.k1 * (1 - self.b + self.b * doc_len / self.avg_doc_len) if self.avg_doc_len > 0 else 1.0
                 score_contrib = idf * numerator / denominator
@@ -115,11 +116,6 @@ class BM25:
         rank = np.argsort(-scores)
         k = min(top_k, self.N)
         return rank[:k].astype(np.int64)
-
-    def _term_freq_in_doc(self, term: str, doc_idx: int) -> int:
-        """Count of term in document at doc_idx."""
-        tokens = _tokenize(self.documents[doc_idx])
-        return tokens.count(term)
 
 
 def rrf_fuse(vector_results: np.ndarray, bm25_results: np.ndarray, k: int = 60) -> np.ndarray:

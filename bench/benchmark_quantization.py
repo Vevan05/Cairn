@@ -17,8 +17,8 @@ import json
 from pathlib import Path
 
 
-def load_corpus(max_docs: int = 500) -> tuple:
-    """Load or build the corpus."""
+def load_corpus(max_docs: int = 0) -> tuple:
+    """Load the built corpus from data/, or rebuild it if missing (0 = all docs)."""
     data_path = Path("data")
     chunks = []
     vectors = None
@@ -33,13 +33,14 @@ def load_corpus(max_docs: int = 500) -> tuple:
 
     if not chunks or vectors is None:
         ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
+        limit = max_docs if max_docs > 0 else None
         docs: list[tuple[str, str]] = []
         for i, row in enumerate(ds):
             text = row["text"].strip()
             if len(text) < 200:
                 continue
             docs.append((f"doc{i}", text))
-            if len(docs) >= max_docs:
+            if limit is not None and len(docs) >= limit:
                 break
 
         chunks = []
@@ -62,7 +63,7 @@ def main() -> None:
     print("=== Day 8: Quantization Memory/Recall Benchmark ===\n")
 
     # Load corpus
-    chunks, vectors = load_corpus(max_docs=500)
+    chunks, vectors = load_corpus()
     print(f"Corpus: {len(chunks)} chunks, {vectors.shape[1]}-dim vectors\n")
 
     # ============================================================

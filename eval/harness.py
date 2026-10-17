@@ -46,7 +46,7 @@ def ndcg_at_k(ranked_ids: list[str], relevant: set[str], k: int) -> float:
 # ---------------------------------------------------------------------------
 @dataclass
 class EvalConfig:
-    retrieval: str = "vector"   # "vector" | "hybrid"
+    retrieval: str = "vector"   # "vector" | "bm25" | "hybrid"
     top_k: int = 10
     alpha: float = 0.6          # hybrid weight for vector side
 
@@ -85,6 +85,12 @@ def _rank_hybrid(query, query_vector, vectors, chunk_ids, bm25, k, alpha):
     return [chunk_ids[i] for i in fused[:k]], [0.0] * min(k, len(fused))
 
 
+def _rank_bm25(query, bm25, chunk_ids, k):
+    """Rank chunk ids by BM25 keyword score."""
+    order = bm25.search(query, top_k=k)
+    return [chunk_ids[i] for i in order], [0.0] * len(order)
+
+
 def run_eval(labeled: list[dict], chunks: list[dict], vectors, bm25, config: EvalConfig,
              embed_query, k: int | None = None) -> EvalReport:
     """Run a labeled set against one retrieval config.
@@ -106,6 +112,8 @@ def run_eval(labeled: list[dict], chunks: list[dict], vectors, bm25, config: Eva
         qv = embed_query(q)
         if config.retrieval == "hybrid" and bm25 is not None:
             ranked, _ = _rank_hybrid(q, qv, vectors, chunk_ids, bm25, k, config.alpha)
+        elif config.retrieval == "bm25" and bm25 is not None:
+            ranked, _ = _rank_bm25(q, bm25, chunk_ids, k)
         else:
             ranked, _ = _rank_vector(qv, vectors, chunk_ids, k)
 
