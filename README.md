@@ -272,7 +272,8 @@ Sized to run within a free tier — Render **512 MB / 0.1 CPU** for the API plus
 > **Troubleshooting Vercel builds.**
 > - `ENOENT … web/web/package.json` → the Root Directory is `web` *and* a `--prefix web` build command is also set. Remove one.
 > - `tsc: command not found` (exit 127) → the install ran outside `web/`, so `web/node_modules` doesn't exist. Add `npm --prefix web install` (root config) or set the Root Directory to `web`.
-> - **Red status dot.** The dot beside the `user_id` field is green when `/health` answers; hover it for the reason. If it reports `Expected JSON from … but got text/html`, requests are hitting the static frontend — i.e. `VITE_API_URL` resolved to empty.
+> - **Status dot.** Beside the `user_id` field: grey = checking, **amber** = waiting for the API to cold-start (normal on a sleeping free tier), green = online, red = unreachable. Hover it for the reason. It **polls** — fast retries for the first minute, then once a minute — so a cold start resolves itself instead of sticking red, and any successful search/answer immediately marks the API as reachable.
+> - If it reports `Expected JSON from … but got text/html`, requests are hitting the static frontend — i.e. `VITE_API_URL` resolved to empty.
 - `web/.env.example` documents the one frontend build-time variable (`VITE_API_URL`). Backend variables (`CORS_ORIGINS`, `DEMO_SEED_USERS`) are set on the host.
 - No database is required — experiment state is in memory (see Limitations).
 - **Answers** are produced by the deterministic stub, so no LLM key or external service is needed — see [Answer generation](#answer-generation).

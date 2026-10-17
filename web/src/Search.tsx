@@ -48,15 +48,41 @@ export function Search() {
   const [rated, setRated] = useState<Record<string, 1 | -1>>({});
   const [toast, setToast] = useState('');
   const [online, setOnline] = useState<boolean | null>(null);
+  const [warming, setWarming] = useState(false);
   const [healthError, setHealthError] = useState('');
   const [view, setView] = useState<View>('search');
   const [highlighted, setHighlighted] = useState<string | null>(null);
   const chunksRef = useRef<HTMLDivElement>(null);
 
+  // Poll /health instead of checking once: on Render's free tier the first
+  // request of the session cold-starts the API (~30-60s), so a single
+  // mount-time check reports "offline" even though the backend is fine.
+  const markReachable = () => { setOnline(true); setWarming(false); setHealthError(''); };
+
   useEffect(() => {
-    api.health()
-      .then(() => { setOnline(true); setHealthError(''); })
-      .catch((e) => { setOnline(false); setHealthError(String(e?.message ?? e)); });
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const startedAt = Date.now();
+    let delay = 2000;
+
+    const check = async () => {
+      try {
+        await api.health();
+        if (cancelled) return;
+        setOnline(true); setWarming(false); setHealthError('');
+        delay = 60000; // healthy -> re-check once a minute
+      } catch (e) {
+        if (cancelled) return;
+        const cold = Date.now() - startedAt < 60000;
+        setOnline(false); setWarming(cold);
+        setHealthError(String((e as Error)?.message ?? e));
+        delay = cold ? Math.min(delay * 1.5, 10000) : 30000;
+      }
+      if (!cancelled) timer = setTimeout(check, delay);
+    };
+
+    check();
+    return () => { cancelled = true; clearTimeout(timer); };
   }, []);
 
   async function runSearch() {
@@ -67,6 +93,7 @@ export function Search() {
       setResults(r.results || []);
       setVariant(r.variant || '');
       setExperimentId(r.experiment_id || '');
+      markReachable();          // a successful call proves the API is up
     } catch (err: any) { alert('Search failed: ' + err); }
     finally { setLoading(false); }
   }
@@ -76,7 +103,7 @@ export function Search() {
     setLoading(true);
     setAnswerText(''); setChunks([]); setCitations([]); setHighlighted(null);
     await api.streamAnswer(query, userId, {
-      onChunks: (c) => { setChunks(c); },
+      onChunks: (c) => { setChunks(c); markReachable(); },
       onToken: (t) => { setAnswerText(prev => prev + t); },
       onDone: (d) => { setCitations(d.citations || []); },
       onError: (e) => { alert('Answer failed: ' + e); },
@@ -144,8 +171,18 @@ export function Search() {
               <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200 font-medium">{variant}</span>
             )}
             <span
-              title={online === false ? `API unreachable: ${healthError}` : online ? 'API online' : 'Checking API…'}
-              className={`w-2 h-2 rounded-full ${online ? 'bg-green-500' : online === false ? 'bg-red-500' : 'bg-slate-400 animate-pulse'}`} />
+              title={
+                online === true ? 'API online'
+                : warming ? 'Waiting for the API to wake up (free-tier cold start)…'
+                : online === false ? `API unreachable: ${healthError}`
+                : 'Checking API…'
+              }
+              className={`w-2 h-2 rounded-full ${
+                online === true ? 'bg-green-500'
+                : warming ? 'bg-amber-400 animate-pulse'
+                : online === false ? 'bg-red-500'
+                : 'bg-slate-400 animate-pulse'
+              }`} />
             <input className="w-32 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1 text-xs"
               value={userId} onChange={e => setUserId(e.target.value)} placeholder="user_id" />
           </div>
