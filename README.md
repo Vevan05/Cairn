@@ -263,15 +263,24 @@ The Vite development server proxies `/search`, `/answer`, `/events`, `/health`, 
 Sized to run within a free tier — Render **512 MB / 0.1 CPU** for the API plus Vercel/Cloudflare static hosting for the frontend:
 
 - `render.yaml` — Render free web service. The build only runs `pip install` plus a one-time prefetch of the ONNX embedding model; the corpus artifacts (`data/chunks.jsonl`, `data/vectors.npy`) are committed, so **no corpus embedding happens at deploy time**. A `/health` check is configured, and `CORS_ORIGINS` sets the allowed frontend origin.
-- **Frontend (Vercel / Cloudflare Pages).** The app lives in `web/`. Pick **one** of these two setups — don't mix them:
-  - **Root Directory = `web`** (simplest). Vercel auto-detects Vite: install and build run inside `web/`, output `dist`. `web/vercel.json` adds the SPA fallback rewrite so `/app` and `/docs` resolve.
-  - **Root Directory = repo root.** Use the root `vercel.json`, which drives everything through `--prefix web` — including `installCommand`, without which `web/node_modules` is never installed and the build fails with `tsc: command not found`.
+- **Frontend (Vercel).** Deployed with **Root Directory = the repo root** (`./`), so Vercel reads the **root `vercel.json`**, which drives the subdirectory app through `--prefix web`:
 
-  Either way, the frontend calls the API cross-origin and the backend sends CORS headers. `web/.env.production` carries a committed, non-secret default `VITE_API_URL`; override it in the host's environment variables if the API moves. Clear any Build / Install / Output overrides in the dashboard so the Root Directory is only set in one place.
+  ```json
+  {
+    "installCommand":  "npm --prefix web install",
+    "buildCommand":    "npm --prefix web run build",
+    "outputDirectory": "web/dist",
+    "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+  }
+  ```
+
+  `installCommand` is required — there is no `package.json` at the repo root, so without it nothing is installed under `web/` and the build fails with `tsc: command not found`. The rewrite provides the SPA fallback so `/app` and `/docs` resolve; Vercel serves real files before applying rewrites, so `/assets/*` is unaffected.
+
+  Leave Build / Install / Output **unset in the dashboard** — `vercel.json` supplies them, and duplicate settings are what produce doubled paths. The frontend calls the API cross-origin and the backend sends CORS headers. `web/.env.production` carries a committed, non-secret default `VITE_API_URL`; override it in the host's environment variables if the API moves.
 
 > **Troubleshooting Vercel builds.**
-> - `ENOENT … web/web/package.json` → the Root Directory is `web` *and* a `--prefix web` build command is also set. Remove one.
-> - `tsc: command not found` (exit 127) → the install ran outside `web/`, so `web/node_modules` doesn't exist. Add `npm --prefix web install` (root config) or set the Root Directory to `web`.
+> - `ENOENT … web/web/package.json` → the Root Directory is `web` *and* a `--prefix web` build command is also set. With Root Directory `./`, the commands must be prefixed; with Root Directory `web`, they must not be.
+> - `tsc: command not found` (exit 127) → the install ran outside `web/`, so `web/node_modules` doesn't exist. Ensure `installCommand` is `npm --prefix web install` (Root Directory `./`).
 > - **Status dot.** Beside the `user_id` field: grey = checking, **amber** = waiting for the API to cold-start (normal on a sleeping free tier), green = online, red = unreachable. Hover it for the reason. It **polls** — fast retries for the first minute, then once a minute — so a cold start resolves itself instead of sticking red, and any successful search/answer immediately marks the API as reachable.
 > - If it reports `Expected JSON from … but got text/html`, requests are hitting the static frontend — i.e. `VITE_API_URL` resolved to empty.
 - `web/.env.example` documents the one frontend build-time variable (`VITE_API_URL`). Backend variables (`CORS_ORIGINS`, `DEMO_SEED_USERS`) are set on the host.
