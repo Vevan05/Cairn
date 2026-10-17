@@ -2,7 +2,7 @@
 
 A retrieval-augmented search engine with a from-scratch vector index and an integrated A/B experimentation platform.
 
-Cairn implements its own approximate-nearest-neighbour index (HNSW), keyword index (BM25), hybrid rank fusion, and scalar quantization in pure Python, embeds text with a small ONNX model, then layers a statistically grounded experimentation framework on top. The system is designed to be deployable on free-tier infrastructure without a managed vector database.
+Cairn implements its own approximate-nearest-neighbour index (HNSW), keyword index (BM25), hybrid rank fusion, and scalar quantization in Python and NumPy, embeds text with a small ONNX model, then layers a statistically grounded experimentation framework on top. The system is designed to be deployable on free-tier infrastructure without a managed vector database.
 
 
 ## Table of contents
@@ -64,7 +64,7 @@ query → variant assignment → retrieval (vector and/or BM25) → rank fusion
       → results → outcome logging → aggregate statistics
 ```
 
-Retrieval and the experimentation framework reside in separate, dependency-free Python packages (`engine/` and `experiments/`) so that both are independently unit-testable and free of web-framework dependencies. The FastAPI application (`api/`) composes them, and the React frontend (`web/`) consumes the HTTP API.
+Retrieval and the experimentation framework reside in separate Python packages with no web-framework dependencies (`engine/` uses only NumPy; `experiments/` is standard library), so both are independently unit-testable. The FastAPI application (`api/`) composes them, and the React frontend (`web/`) consumes the HTTP API.
 
 At startup the service loads the precomputed artifacts (vectors + chunks) and builds the in-memory BM25 index; it **never builds the HNSW graph**. Online search is exact brute-force over the float32 vectors plus BM25, fused with RRF. HNSW is a benchmarked component (`bench/`, with save/load persistence) rather than the serving path.
 
@@ -91,7 +91,7 @@ All figures are reproducible from the scripts referenced in the final column. Co
 | End-to-end experiment | control 9.95% vs treatment 12.73% thumbs-up; +27.9% relative; z = −6.20 | same |
 | SRM detection | 50/50 not flagged; 52/48, 60/40, 90/10 flagged | same |
 
-HNSW recall responds to `efSearch` as expected: **0.68 → 0.96 → 1.00** at `efSearch` 10 / 40 / 80. Because the graph search is pure Python, the speedup over a vectorised NumPy brute force depends on how far it searches — roughly **3× at recall 0.68** (`efSearch` 10), near parity at recall 0.96, and slower at recall 1.0. The honest summary is that HNSW trades recall for latency, and at ~17k vectors the pure-Python implementation only wins when some recall is sacrificed; at larger corpora the O(N) brute-force term grows and the crossover moves.
+HNSW recall responds to `efSearch` as expected: **0.68 → 0.96 → 1.00** at `efSearch` 10 / 40 / 80. Because graph traversal is Python-level — one NumPy dot product per visited node — the speedup over a vectorised NumPy brute force depends on how far it searches: roughly **3× at recall 0.68** (`efSearch` 10), near parity at recall 0.96, and slower at recall 1.0. The honest summary is that HNSW trades recall for latency, and at ~17k vectors the Python-level implementation only wins when some recall is sacrificed; at larger corpora the O(N) brute-force term grows and the crossover moves.
 
 
 ## Components
@@ -99,8 +99,8 @@ HNSW recall responds to `efSearch` as expected: **0.68 → 0.96 → 1.00** at `e
 | Path | Responsibility |
 |---|---|
 | `pipeline/` | WikiText-2 loading, word-window chunking (200 words, 40-word overlap), embedding, and artifact generation. |
-| `engine/` | Brute-force and HNSW nearest-neighbour search, BM25, Reciprocal Rank Fusion, int8 quantization. Pure Python, no web dependencies. |
-| `experiments/` | Deterministic bucketing, hypothesis tests, SRM detection, idempotent logging, and simulation. Pure Python. |
+| `engine/` | Brute-force and HNSW nearest-neighbour search, BM25, Reciprocal Rank Fusion, int8 quantization. Python + NumPy, no web dependencies. |
+| `experiments/` | Deterministic bucketing, hypothesis tests, SRM detection, idempotent logging, and simulation. Pure Python (standard library only). |
 | `eval/` | Retrieval metrics (recall@k, MRR, nDCG) and the labelled-set harness. |
 | `api/` | FastAPI application, request/response models, and the language-model provider interface. |
 | `web/` | React, TypeScript, and Tailwind frontend built with Vite. |
@@ -178,6 +178,8 @@ On the bundled 100-query corpus-derived set, vector retrieval scores recall@10 0
 `POST /answer` and `GET /answer/stream` retrieve the top passages, build a citation-constrained RAG prompt, and produce an answer that cites them. The prose itself comes from a **deterministic stub** (`StubProvider`): retrieval, ranking, streaming and citation highlighting are all real, but no language model is called.
 
 That is a deliberate trade-off — it keeps the demo and the test suite offline, reproducible, and free of API keys and rate limits. The `LLMProvider` interface (`generate` / `generate_stream`) exists precisely so a hosted model is a drop-in swap: implement it and return it from `api/main.py`, and nothing else changes.
+
+The Answer view labels this in the UI itself with a **"Demo mode · templated answer from retrieved passages"** badge, so the stub can't be mistaken for a real model's output.
 
 | Real | Stubbed |
 |---|---|
@@ -279,7 +281,7 @@ Two results that first looked like ordinary ANN / quantization trade-offs were a
 
 - **Answer generation.** `/answer` returns a deterministic stub answer: retrieval, streaming and citations are real, but the prose is templated. The `LLMProvider` interface is in place for a drop-in hosted model, and answer quality is not evaluated (only retrieval is).
 - **State.** Experiment definitions and events are held in memory, so they reset on restart. To keep the dashboard meaningful on a non-persistent free tier, the default experiment is seeded with synthetic traffic at startup (`DEMO_SEED_USERS`, flagged `demo_seeded`). The PostgreSQL schema (`scripts/init_db.sql`) and the statistics functions are complete, but the persistence layer is not yet wired, and the scheduled statistics job is not implemented.
-- **HNSW performance.** Recall@10 reaches 0.96–1.00 at `efSearch` 40–80, but the index is pure Python: the graph build takes minutes at ~17k vectors and, at correct recall, is around parity with NumPy brute force at this scale. It is a benchmarked component, not the serving path — the served search is exact brute force.
+- **HNSW performance.** Recall@10 reaches 0.96–1.00 at `efSearch` 40–80, but the index is Python-level (a NumPy dot product per visited node): the graph build takes minutes at ~17k vectors and, at correct recall, is around parity with NumPy brute force at this scale. It is a benchmarked component, not the serving path — the served search is exact brute force.
 - **Evaluation set.** The bundled evaluation set is corpus-derived and intended to demonstrate the harness; a hand-verified question set is required for publication-quality retrieval metrics.
 
 

@@ -1,4 +1,4 @@
-"""Experiments: deterministic bucketing, stats, SRM - pure Python package, tested."""
+"""Experiments: deterministic bucketing, stats, SRM - pure Python (standard library only), tested."""
 from __future__ import annotations
 
 import hashlib

@@ -8,7 +8,7 @@ type View = 'search' | 'answer' | 'experiments' | 'eval';
 
 const TAB_DESCRIPTIONS: Record<View, string> = {
   search: 'Find the closest passages in the corpus, ranked by cosine similarity. No LLM — just fast, from-scratch retrieval.',
-  answer: 'Retrieve the best passages, then stream a grounded answer with citations you can click to highlight the source.',
+  answer: 'Retrieve the best passages, then stream a citation-grounded answer. Demo mode: the prose is templated by a stub — retrieval, streaming and citations are real, but no LLM is called.',
   experiments: 'A/B test retrieval configs. Create experiments, set variant weights, and read z-tests + SRM checks.',
   eval: 'Score retrieval configs offline on a labeled set: recall@k, MRR, and nDCG@k for vector vs hybrid.',
 };
@@ -191,7 +191,12 @@ export function Search() {
             {/* Streaming answer + citations */}
             {showingAnswer && (answerText || chunks.length > 0) && (
               <section className="rounded-2xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50 dark:bg-emerald-950 p-6">
-                <h3 className="font-semibold text-emerald-800 dark:text-emerald-200 mb-2">Answer</h3>
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  <h3 className="font-semibold text-emerald-800 dark:text-emerald-200">Answer</h3>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200 font-medium">
+                    Demo mode · templated answer from retrieved passages
+                  </span>
+                </div>
                 <p className="whitespace-pre-wrap leading-relaxed text-emerald-900 dark:text-emerald-100">{answerText}<span className="animate-pulse">▍</span></p>
                 {citations.length > 0 && (
                   <div className="mt-4 flex flex-wrap gap-2">
@@ -258,7 +263,7 @@ export function Search() {
       </main>
 
       <footer className="max-w-5xl mx-auto px-6 py-6 text-center text-xs text-slate-400 dark:text-slate-600">
-        Cairn · from-scratch RAG search engine · pure Python engine · free-tier deployable ·{' '}
+        Cairn · from-scratch RAG search engine · pure Python + NumPy engine · free-tier deployable ·{' '}
         <Link to="/docs" className="text-indigo-500 hover:underline">Simulation docs</Link>
       </footer>
 

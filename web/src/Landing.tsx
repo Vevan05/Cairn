@@ -10,7 +10,7 @@ const FEATURES = [
   {
     icon: '💬',
     title: 'Answer',
-    desc: 'Stream a grounded answer token-by-token, with citations you can click to highlight the source passage.',
+    desc: 'Stream a citation-grounded answer token-by-token, with click-to-highlight citations. Demo mode: the prose is templated, not LLM-generated.',
     color: 'emerald',
   },
   {

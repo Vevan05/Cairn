@@ -130,7 +130,7 @@ def main() -> None:
     print("Observations:")
     print(f"- HNSW recall@10 on corpus queries at M=32, ef_construction=200 (N={len(vectors)})")
     print("- Below ~5k vectors, HNSW is at parity with brute force: a vectorised NumPy")
-    print("  matmul is a high bar and pure-Python graph traversal costs ~1 ms/query.")
+    print("  matmul is a high bar and Python-level graph traversal costs ~1 ms/query.")
     print("  Above that, brute force grows O(N) while HNSW stays near-flat, so the")
     print("  speedup widens with corpus size.")
     print("- efSearch trades recall against latency; larger ef -> higher recall, slower")
