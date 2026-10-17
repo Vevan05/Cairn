@@ -161,17 +161,30 @@ class HNSW:
             self._max_level = new_level
             self.entry_point = node_id
 
+    def _max_links(self, level: int) -> int:
+        """Admission cap for a node's adjacency at `level`.
+
+        HNSW allows Mmax0 = 2*M links at the base layer and M above it
+        (Malkov & Yashunin, Algorithm 1). Capping level 0 at M as well prunes
+        far more aggressively: every newly inserted node is evicted from its
+        neighbours' lists, so the graph stays *weakly* connected while
+        forward-reachable sets stay tiny — which caps recall and makes
+        efSearch ineffective.
+        """
+        return self.M * 2 if level == 0 else self.M
+
     def _link(self, src: int, dst: int, level: int) -> None:
-        """Add a link src->dst at `level`, pruning src back to M neighbours."""
+        """Add a link src->dst at `level`, pruning src back to its cap."""
         src_node = self.nodes[src]
         if src_node.adj[level] is None:
             src_node.adj[level] = []
         if dst not in src_node.adj[level]:
             src_node.adj[level].append(dst)
-        if len(src_node.adj[level]) > self.M:
+        cap = self._max_links(level)
+        if len(src_node.adj[level]) > cap:
             vec = self._get_vector(src)
             candidates = [(self._cosine_similarity(vec, self._get_vector(n)), n) for n in src_node.adj[level]]
-            src_node.adj[level] = self._select_neighbors(vec, candidates, self.M)
+            src_node.adj[level] = self._select_neighbors(vec, candidates, cap)
 
     def _select_neighbors(self, base_vec: np.ndarray, candidates: list[tuple[float, int]], m: int) -> list[int]:
         """Select up to `m` neighbours using the HNSW diversity heuristic.

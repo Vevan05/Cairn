@@ -2,21 +2,53 @@
 from __future__ import annotations
 
 import json
+import os
 import random
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
 from engine.search import brute_force_search, BM25, rrf_fuse
 from pipeline.embeddings import embed_query
-from api.llm_provider import StubProvider, CachedProvider, build_rag_prompt, extract_citations
+from api.llm_provider import StubProvider, build_rag_prompt, extract_citations
 from experiments import assign_variant, two_proportion_z, welch_t, srm_chi_square
 from eval import EvalConfig, run_eval
 
-app = FastAPI(title="Cairn")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Load the index and seed demo traffic at startup.
+
+    Loading here (rather than lazily on first request) means a cold start is
+    deterministic and a missing/broken artifact set fails fast, before the
+    platform routes traffic.
+    """
+    _ensure_index()
+    _seed_demo_data()
+    yield
+
+
+app = FastAPI(title="Cairn", lifespan=lifespan)
+
+# ---------------------------------------------------------------------------
+# CORS
+# ---------------------------------------------------------------------------
+# The frontend is deployed separately (e.g. Vercel) and calls this API
+# cross-origin, so browsers require CORS headers. Set CORS_ORIGINS to a
+# comma-separated allow-list in production; the default allows any origin,
+# which is fine for a public, credential-less demo API.
+_cors_origins = os.getenv("CORS_ORIGINS", "*")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"] if _cors_origins == "*" else [o.strip() for o in _cors_origins.split(",") if o.strip()],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------------------------------------------------------------------------
 # Default experiment definition
@@ -57,6 +89,21 @@ def _ensure_index():
                     _INDEX_CHUNKS.append(json.loads(line))
         if _INDEX_CHUNKS:
             _BM25 = BM25([c["text"] for c in _INDEX_CHUNKS])
+
+
+# ---------------------------------------------------------------------------
+# Answer provider
+# ---------------------------------------------------------------------------
+# The app ships with the deterministic stub: no API key, no network, and the
+# test suite stays offline. Swap in a hosted model by implementing LLMProvider
+# and returning it here — nothing else changes.
+def _provider() -> StubProvider:
+    return StubProvider()
+
+
+# Number of synthetic users seeded into the demo experiment at startup. Set to
+# 0 to disable. See _seed_demo_data for why this exists.
+DEMO_SEED_USERS = int(os.getenv("DEMO_SEED_USERS", "1200"))
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +156,30 @@ def _log_outcome(experiment_id: str, variant: str, metric: str, value: float,
     elif metric == "latency_ms":
         store["latencies"].append(float(value))
     return True
+
+
+# ---------------------------------------------------------------------------
+# Demo seeding
+# ---------------------------------------------------------------------------
+def _seed_demo_data() -> None:
+    """Populate the default experiment with simulated traffic at startup.
+
+    Render's free tier has no persistence, so experiment state is lost on every
+    restart/sleep. Without this the A/B dashboard would be empty on each cold
+    start. The data goes through the same bucketing/exposure/outcome helpers as
+    live traffic, and the experiment is flagged `demo_seeded` so the UI can
+    label it as simulated.
+    """
+    exp_id = DEFAULT_EXPERIMENT["id"]
+    if DEMO_SEED_USERS <= 0 or exp_id not in _EXPERIMENTS:
+        return
+    if _EXPOSURES.get(exp_id):
+        return  # already has traffic (e.g. a warm reload)
+    simulate_traffic(
+        exp_id,
+        SimulateRequest(n_users=DEMO_SEED_USERS, control_rate=0.10, treatment_lift=0.06, seed=7),
+    )
+    _EXPERIMENTS[exp_id]["demo_seeded"] = True
 
 
 # ---------------------------------------------------------------------------
@@ -252,10 +323,9 @@ def search(req: SearchRequest) -> dict:
 @app.post("/answer")
 def answer(req: AnswerRequest) -> dict:
     retrieved = _retrieve(req.query, {"retrieval": "hybrid"}, k=5)
-    provider = CachedProvider(StubProvider(), ttl_seconds=3600)
     prompt = build_rag_prompt(req.query, [{"chunk_id": r["chunk_id"], "text": r["text"]} for r in retrieved])
     chunk_ids = [r["chunk_id"] for r in retrieved]
-    result = provider.generate(prompt, options={"top_chunk_id": chunk_ids[0] if chunk_ids else "", "chunk_ids": chunk_ids})
+    result = _provider().generate(prompt, options={"top_chunk_id": chunk_ids[0] if chunk_ids else "", "chunk_ids": chunk_ids})
     citations = extract_citations(result["text"], chunk_ids) or chunk_ids[:1]
     return {
         "query": req.query,
@@ -278,10 +348,9 @@ def answer_stream(query: str = Query(...), user_id: str = "anon"):
         # 1) send the retrieved chunks first so the UI can render citations
         yield f"event: chunks\ndata: {json.dumps(retrieved)}\n\n"
         # 2) stream the answer tokens
-        provider = StubProvider()
         prompt = build_rag_prompt(query, [{"chunk_id": r["chunk_id"], "text": r["text"]} for r in retrieved])
         full = ""
-        for token in provider.generate_stream(prompt, options=options):
+        for token in _provider().generate_stream(prompt, options=options):
             full += token
             yield f"event: token\ndata: {json.dumps(token)}\n\n"
         # 3) done event with final citations
@@ -511,6 +580,7 @@ def experiment_results(exp_id: str) -> dict:
         "test": test,
         "srm": srm,
         "verdict": label,
+        "demo_seeded": exp.get("demo_seeded", False),
     }
 
 

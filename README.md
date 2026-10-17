@@ -2,7 +2,7 @@
 
 A retrieval-augmented search engine with a from-scratch vector index and an integrated A/B experimentation platform.
 
-Cairn implements its own approximate-nearest-neighbour index (HNSW), keyword index (BM25), hybrid rank fusion, and scalar quantization in pure Python, then layers a statistically grounded experimentation framework on top. The system is designed to be deployable on free-tier infrastructure without a managed vector database.
+Cairn implements its own approximate-nearest-neighbour index (HNSW), keyword index (BM25), hybrid rank fusion, and scalar quantization in pure Python, embeds text with a small ONNX model, then layers a statistically grounded experimentation framework on top. The system is designed to be deployable on free-tier infrastructure without a managed vector database.
 
 
 ## Table of contents
@@ -14,11 +14,13 @@ Cairn implements its own approximate-nearest-neighbour index (HNSW), keyword ind
 - [API reference](#api-reference)
 - [Experimentation framework](#experimentation-framework)
 - [Offline evaluation](#offline-evaluation)
+- [Answer generation](#answer-generation)
 - [Benchmarks](#benchmarks)
 - [Testing](#testing)
 - [Local development](#local-development)
 - [Deployment](#deployment)
 - [Repository structure](#repository-structure)
+- [Engineering notes](#engineering-notes)
 - [Limitations and future work](#limitations-and-future-work)
 - [License](#license)
 
@@ -36,7 +38,7 @@ The application exposes four views:
 | View | Function |
 |---|---|
 | Search | Ranked corpus passages by cosine similarity, with per-result score and confidence. No language model involved. |
-| Answer | A streamed, citation-grounded answer; selecting a citation highlights the corresponding source passage. |
+| Answer | Streams a citation-grounded answer from the deterministic stub generator; selecting a citation highlights the corresponding source passage. |
 | Experiments | A/B dashboard and administration console: create, activate, pause, and delete experiments; edit variants and weights; generate traffic; inspect hypothesis tests and SRM status. |
 | Eval | Offline evaluation of retrieval configurations against a labelled set (recall@k, MRR, nDCG@k). |
 
@@ -64,6 +66,8 @@ query → variant assignment → retrieval (vector and/or BM25) → rank fusion
 
 Retrieval and the experimentation framework reside in separate, dependency-free Python packages (`engine/` and `experiments/`) so that both are independently unit-testable and free of web-framework dependencies. The FastAPI application (`api/`) composes them, and the React frontend (`web/`) consumes the HTTP API.
 
+At startup the service loads the precomputed artifacts (vectors + chunks) and builds the in-memory BM25 index; it **never builds the HNSW graph**. Online search is exact brute-force over the float32 vectors plus BM25, fused with RRF. HNSW is a benchmarked component (`bench/`, with save/load persistence) rather than the serving path.
+
 
 ## Key results
 
@@ -72,14 +76,14 @@ All figures are reproducible from the scripts referenced in the final column. Co
 | Metric | Value | Source |
 |---|---|---|
 | int8 quantization, memory | 24.6 MB → 6.1 MB (4×) | `bench/benchmark_quantization.py` |
-| int8 average cosine similarity (after dequantization) | 0.504 | same |
-| int8 vs float32, brute-force recall@10 | 50–60% overlap | same |
-| HNSW recall@10 (M=32, efConstruction=200) | 0.70 | `bench/benchmark_hnsw.py` |
-| HNSW query latency (16,770 vectors) | ~0.9 ms | same |
-| HNSW speedup vs brute force | ~3.7× | same |
-| Retrieval — vector: recall@10 / MRR / nDCG@10 | 0.920 / 0.771 / 0.808 | `bench/benchmark_day9.py` |
+| int8 average cosine similarity (after dequantization) | 0.9999 | same |
+| int8 vs float32, brute-force recall@10 | 0.99 overlap | same |
+| HNSW recall@10 (M=32, efConstruction=200) | 0.96 @ efSearch 40 → 1.00 @ 80 | `bench/benchmark_hnsw.py` |
+| HNSW query latency (16,770 vectors) | 0.6 ms (ef 10) … 3.0 ms (ef 100) | same |
+| Brute-force query latency (16,770 vectors) | ~2 ms | same |
+| Retrieval — vector: recall@10 / MRR / nDCG@10 | 0.970 / 0.884 / 0.905 | `bench/benchmark_day9.py` |
 | Retrieval — BM25: recall@10 / MRR / nDCG@10 | 1.000 / 0.985 / 0.989 | same |
-| Retrieval — hybrid: recall@10 / MRR / nDCG@10 | 1.000 / 0.892 / 0.919 | same |
+| Retrieval — hybrid: recall@10 / MRR / nDCG@10 | 1.000 / 0.948 / 0.961 | same |
 | Bucketing split (20,000 users, 50/50) | 49.41% / 50.59% | `experiments/simulation.py` |
 | Cross-experiment bucket correlation | +0.007 | same |
 | A/A false-positive rate (α = 0.05) | 4.3% | same |
@@ -87,7 +91,7 @@ All figures are reproducible from the scripts referenced in the final column. Co
 | End-to-end experiment | control 9.95% vs treatment 12.73% thumbs-up; +27.9% relative; z = −6.20 | same |
 | SRM detection | 50/50 not flagged; 52/48, 60/40, 90/10 flagged | same |
 
-At 16,770 vectors HNSW is ~3.7× faster than brute force, and the gap widens with corpus size: brute force is O(N) per query while HNSW is roughly flat. Recall is an explicit trade-off — brute force is exact, whereas HNSW gives up roughly 30% of the top-10 for the speedup. Raising `M` or `efConstruction` improves recall at the cost of build time.
+HNSW recall responds to `efSearch` as expected: **0.68 → 0.96 → 1.00** at `efSearch` 10 / 40 / 80. Because the graph search is pure Python, the speedup over a vectorised NumPy brute force depends on how far it searches — roughly **3× at recall 0.68** (`efSearch` 10), near parity at recall 0.96, and slower at recall 1.0. The honest summary is that HNSW trades recall for latency, and at ~17k vectors the pure-Python implementation only wins when some recall is sacrificed; at larger corpora the O(N) brute-force term grows and the crossover moves.
 
 
 ## Components
@@ -102,15 +106,16 @@ At 16,770 vectors HNSW is ~3.7× faster than brute force, and the gap widens wit
 | `web/` | React, TypeScript, and Tailwind frontend built with Vite. |
 | `bench/` | Reproducible benchmark scripts. |
 | `tests/` | pytest suite (36 tests). |
-| `scripts/` | SQL schema for the production database. |
+| `scripts/` | PostgreSQL schema for future persistence (not required to run). |
 | `docs/` | Design notes and the simulation guide. |
 
 ### Retrieval engine
 
+- **Embeddings.** `BAAI/bge-small-en-v1.5` (384-dim) served through **ONNX Runtime** (`fastembed`), chosen over PyTorch to fit the free-tier memory budget. Documents are embedded once at build time; queries are embedded per request with the model's asymmetric query prefix.
 - **HNSW.** A multi-layer proximity graph. Nodes receive a random level (`P(level ≥ k) = 0.5^k`); insertion searches each layer for candidate neighbours and applies the diversity heuristic from Malkov and Yashunin to maintain connectivity; search performs greedy descent through the upper layers followed by a best-first beam search (`efSearch`) at layer 0. The index supports persistence to disk.
-- **BM25.** An inverted index with document-length normalization and the standard `k1` and `b` parameters.
+- **BM25.** An inverted index with document-length normalization and the standard `k1` and `b` parameters. Term frequencies are stored at build time, and postings are packed into compact C-int arrays rather than tuples.
 - **Reciprocal Rank Fusion.** Combines vector and keyword rankings without requiring normalization across incompatible score scales.
-- **Int8 quantization.** Per-dimension scalar quantization with stored scales; reduces index memory by 4× (24.6 MB → 6.1 MB at 16,770 chunks) at a measured cost of 0.504 average cosine similarity and 50–60% brute-force recall overlap.
+- **Int8 quantization.** Symmetric per-dimension scalar quantization with stored scales; reduces index memory by 4× (24.6 MB → 6.1 MB at 16,770 chunks) while preserving ranking: 0.9999 average cosine similarity and 0.99 brute-force recall@10 overlap. Quantization is a benchmarked capability rather than the serving path — the API serves float32 vectors.
 
 
 ## API reference
@@ -165,7 +170,21 @@ The evaluation harness scores a retrieval configuration against a labelled set o
 POST /eval/run  { "set_id": "...", "top_k": 10, "compare": ["vector", "bm25", "hybrid"] }
 ```
 
-On the bundled 100-query corpus-derived set, vector retrieval scores recall@10 0.920 / MRR 0.771 / nDCG@10 0.808, while hybrid fusion scores 1.000 / 0.892 / 0.919. BM25 alone is strongest on this particular set (1.000 / 0.985 / 0.989), because each query reuses rare terms from its source chunk — a property of corpus-derived queries rather than a general result. Supported configs are `vector`, `bm25`, and `hybrid`.
+On the bundled 100-query corpus-derived set, vector retrieval scores recall@10 0.970 / MRR 0.884 / nDCG@10 0.905, hybrid fusion scores 1.000 / 0.948 / 0.961, and BM25 alone scores 1.000 / 0.985 / 0.989. BM25 is strongest on this particular set because each query reuses rare terms from its source chunk — a property of corpus-derived queries rather than a general result. Supported configs are `vector`, `bm25`, and `hybrid`.
+
+
+## Answer generation
+
+`POST /answer` and `GET /answer/stream` retrieve the top passages, build a citation-constrained RAG prompt, and produce an answer that cites them. The prose itself comes from a **deterministic stub** (`StubProvider`): retrieval, ranking, streaming and citation highlighting are all real, but no language model is called.
+
+That is a deliberate trade-off — it keeps the demo and the test suite offline, reproducible, and free of API keys and rate limits. The `LLMProvider` interface (`generate` / `generate_stream`) exists precisely so a hosted model is a drop-in swap: implement it and return it from `api/main.py`, and nothing else changes.
+
+| Real | Stubbed |
+|---|---|
+| Hybrid retrieval, ranking, scores | The answer prose |
+| Citation-constrained prompt (`build_rag_prompt`) | |
+| Token-by-token SSE streaming | |
+| Click-to-highlight citations | |
 
 
 ## Benchmarks
@@ -182,6 +201,7 @@ On the bundled 100-query corpus-derived set, vector retrieval scores recall@10 0
 ## Testing
 
 ```bash
+pip install -r requirements-dev.txt
 PYTHONPATH=. pytest -q       # 36 passing
 ```
 
@@ -194,11 +214,13 @@ Coverage spans the retrieval engine (brute force, BM25, RRF, quantization, HNSW,
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt      # runtime + datasets + pytest
 
-bash build.sh                       # generates data/chunks.jsonl and data/vectors.npy (~16.8k chunks, several minutes)
+bash build.sh                           # (re)build artifacts; ~16.8k chunks
 PYTHONPATH=. uvicorn api.main:app --port 8000
 ```
+
+The committed corpus artifacts mean `pip install -r requirements.txt` (runtime only) is enough to serve; `requirements-dev.txt` is only needed to rebuild the corpus or run the tests/benchmarks.
 
 Interactive API documentation is available at `http://localhost:8000/docs`.
 
@@ -215,15 +237,17 @@ The Vite development server proxies `/search`, `/answer`, `/events`, `/health`, 
 
 ## Deployment
 
-The system targets free-tier infrastructure:
+Sized to run within a free tier — Render **512 MB / 0.1 CPU** for the API plus Vercel/Cloudflare static hosting for the frontend:
 
-- `render.yaml` — Render free web service and free PostgreSQL; the build step installs dependencies and runs `build.sh`.
-- `vercel.json` — static frontend hosting (Vercel or Cloudflare Pages) with SPA fallback and API rewrites.
-- `scripts/init_db.sql` — PostgreSQL schema for experiments, variants, exposures, outcomes, and results.
+- `render.yaml` — Render free web service. The build only runs `pip install` plus a one-time prefetch of the ONNX embedding model; the corpus artifacts (`data/chunks.jsonl`, `data/vectors.npy`) are committed, so **no corpus embedding happens at deploy time**. A `/health` check is configured, and `CORS_ORIGINS` sets the allowed frontend origin.
+- `vercel.json` — static frontend hosting with SPA fallback. Set **`VITE_API_URL`** to the deployed API URL at build time; the frontend then calls the API cross-origin and the backend sends CORS headers.
+- `web/.env.example` documents the one frontend build-time variable (`VITE_API_URL`). Backend variables (`CORS_ORIGINS`, `DEMO_SEED_USERS`) are set on the host.
+- No database is required — experiment state is in memory (see Limitations).
+- **Answers** are produced by the deterministic stub, so no LLM key or external service is needed — see [Answer generation](#answer-generation).
+- **Cold starts.** Render's free tier sleeps after inactivity, so the first request can take up to a minute while the instance wakes and reloads the index. The landing page warns visitors about this.
+- **Demo data.** Because state is not persisted, the default experiment is seeded with synthetic traffic at startup so the dashboard is not empty; it is flagged as simulated in the UI.
 
-Set `VITE_API_URL` at frontend build time to target the deployed API. Replacing `StubProvider` in `api/llm_provider.py` with a free-tier language-model provider enables real answer generation.
-
-> **Build time.** `data/` is git-ignored and regenerated by `build.sh`, which now embeds the full ~16.8k-chunk corpus. That takes several minutes on a workstation and considerably longer on a free-tier builder. For a snappier free deploy, ship precomputed artifacts (the 6.1 MB int8 vectors plus `chunks.jsonl`) instead of embedding at deploy time, or lower `--max-docs` in `build.sh`.
+> **Why the runtime fits in 512 MB.** Embeddings run on **ONNX Runtime** (`fastembed`), not PyTorch — importing torch + transformers alone costs ~600 MB. Measured runtime peak is **~371 MB** (index ~126 MB + ONNX embedder ~245 MB); the corpus size is not the constraint, since the index is only ~100 MB thanks to compact BM25 postings.
 
 
 ## Repository structure
@@ -236,17 +260,26 @@ eval/          retrieval metrics and the labelled-set harness
 api/           FastAPI application and language-model provider
 web/           React + TypeScript + Tailwind frontend
 bench/         reproducible benchmark scripts
-scripts/       database schema
+scripts/       PostgreSQL schema (future persistence; not required to run)
 tests/         pytest suite
 docs/          design notes and simulation guide
-data/          generated artifacts (git-ignored)
+data/          corpus artifacts — chunks.jsonl + vectors.npy (committed for deploy)
 ```
+
+## Engineering notes
+
+Two results that first looked like ordinary ANN / quantization trade-offs were actually implementation bugs. Both are reproducible from the benchmarks and are now fixed.
+
+**int8 quantization was using 3 of 256 levels.** `quantize_int8` scaled each dimension by its maximum magnitude, so `vectors / scale` landed in `[-1, 1]` and rounding produced only `{-1, 0, 1}`. The scale must map the maximum to 127 — the largest representable int8 value — and clipping must happen *before* the cast (casting an out-of-range float to `int8` wraps rather than saturates). Fix: `scale = max_abs / 127`. Effect: average cosine similarity **0.711 → 0.9999**, brute-force recall@10 overlap **26% → 99%**.
+
+**HNSW capped layer-0 links at M instead of 2·M.** HNSW admits `Mmax0 = 2·M` links at the base layer; capping at `M` pruned every newly inserted node back out of its neighbours' adjacency lists. The graph stayed *weakly* connected (a single component) while **forward** reachability from the entry point collapsed to **41 / 5000** nodes — which capped recall and made `efSearch` a no-op. The tell was identical recall at every `efSearch` from 10 to 200, when recall should rise with the beam width. Fix: `_max_links(level) = 2*M` at level 0. Effect: forward reachability **41/5000 → 5000/5000**, and recall@10 now tracks `efSearch` (0.68 / 0.96 / 1.00 at 10 / 40 / 80).
+
 
 ## Limitations and future work
 
-- **Answer generation.** The `/answer` endpoint currently uses a deterministic stub provider. The provider interface is in place; a real model can be substituted without API changes.
-- **State.** Experiment definitions and events are held in memory. The PostgreSQL schema (`scripts/init_db.sql`) and the statistics functions are complete, but the persistence layer is not yet wired, and the scheduled statistics job is not implemented.
-- **HNSW performance.** On 16,770 vectors HNSW is clearly faster than brute force, but the index is pure Python: the graph build takes several minutes at this size and latency is ~1 ms/query. At larger corpora the index should be persisted and loaded rather than rebuilt on every deploy.
+- **Answer generation.** `/answer` returns a deterministic stub answer: retrieval, streaming and citations are real, but the prose is templated. The `LLMProvider` interface is in place for a drop-in hosted model, and answer quality is not evaluated (only retrieval is).
+- **State.** Experiment definitions and events are held in memory, so they reset on restart. To keep the dashboard meaningful on a non-persistent free tier, the default experiment is seeded with synthetic traffic at startup (`DEMO_SEED_USERS`, flagged `demo_seeded`). The PostgreSQL schema (`scripts/init_db.sql`) and the statistics functions are complete, but the persistence layer is not yet wired, and the scheduled statistics job is not implemented.
+- **HNSW performance.** Recall@10 reaches 0.96–1.00 at `efSearch` 40–80, but the index is pure Python: the graph build takes minutes at ~17k vectors and, at correct recall, is around parity with NumPy brute force at this scale. It is a benchmarked component, not the serving path — the served search is exact brute force.
 - **Evaluation set.** The bundled evaluation set is corpus-derived and intended to demonstrate the harness; a hand-verified question set is required for publication-quality retrieval metrics.
 
 

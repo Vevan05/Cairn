@@ -83,6 +83,9 @@ export function Landing() {
             How it works
           </a>
         </div>
+        <p className="mt-8 text-sm text-slate-400 dark:text-slate-500">
+          Runs on a free tier, so the first load after a period of inactivity can take up to a minute while the API wakes up.
+        </p>
       </section>
 
       {/* Features */}

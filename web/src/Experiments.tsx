@@ -249,6 +249,14 @@ export function Experiments() {
 
       {error && <div className="text-red-600 text-sm">{error}</div>}
 
+      {results && results.demo_seeded && (
+        <section className="rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 p-4 text-sm text-amber-800 dark:text-amber-200">
+          <span className="font-semibold">Simulated demo data.</span> This instance has no persistence, so the
+          experiment is seeded with synthetic traffic at startup to keep the dashboard meaningful.
+          Use <span className="font-medium">Simulate traffic</span> below, or run real searches, to add your own.
+        </section>
+      )}
+
       {results && (
         <>
           <section className={`rounded-2xl p-5 flex items-center gap-3 ${statusClass(results.verdict)}`}>

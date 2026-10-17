@@ -1,0 +1,8 @@
+# Development / build / benchmark dependencies.
+# `datasets` is only needed to (re)build the corpus with build.sh; the deploy
+# ships precomputed artifacts (data/chunks.jsonl, data/vectors.npy).
+# `httpx` is required by fastapi's TestClient.
+-r requirements.txt
+datasets==5.1.0
+pytest==9.1.1
+httpx==0.28.1

@@ -8,19 +8,22 @@ import numpy as np
 def quantize_int8(vectors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Quantize float32 vectors to int8, returning quantized vectors and scale factors.
 
-    Each column (dimension) is scaled by its max absolute value.
+    Symmetric per-dimension (column-wise) quantization. Each dimension is scaled
+    so its maximum magnitude maps to 127, the largest representable int8 value —
+    i.e. `scaled = v / (max_abs / 127)`, which spans the full [-127, 127] range.
+
+    (Scaling by the max magnitude itself would map everything to [-1, 1] and
+    round to just {-1, 0, 1}, wasting 254 of the 256 codes.)
     Returns (int8_vectors, scales) where scales shape is (dimensions,).
     """
-    # Compute per-column scale: max absolute value, protect against zero
-    abs_vectors = np.abs(vectors)
-    scales = np.max(abs_vectors, axis=0, keepdims=True).astype(np.float32)  # (1, D)
-    scales = np.maximum(scales, 1e-8)  # avoid div-by-zero
+    max_abs = np.max(np.abs(vectors), axis=0, keepdims=True).astype(np.float32)  # (1, D)
+    # Units-per-code: max magnitude -> 127. Guard all-zero columns.
+    scales = np.where(max_abs > 0, max_abs / 127.0, 1e-8).astype(np.float32)
 
-    # Scale, round to int8, clip
-    scaled = vectors / scales  # (N, D) in approximately [-128, 127] range
-    int8_vectors = np.round(scaled).astype(np.int8)
-    # Clip to int8 range just in case
-    int8_vectors = np.clip(int8_vectors, np.iinfo(np.int8).min, np.iinfo(np.int8).max)
+    scaled = vectors / scales  # (N, D) in [-127, 127]
+    # Clip in float space *before* casting: casting an out-of-range float to
+    # int8 wraps around rather than saturating.
+    int8_vectors = np.clip(np.round(scaled), -127, 127).astype(np.int8)
 
     return int8_vectors, scales.squeeze(0)  # scales shape (D,)
 

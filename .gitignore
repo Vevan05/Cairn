@@ -16,8 +16,12 @@ dist/
 .vite/
 *.local
 
-# ── Build artifacts (rebuildable via build.sh) ──────────
-data/
+# ── Build artifacts ─────────────────────────────────────
+# The corpus artifacts are committed so the free-tier deploy does not have to
+# embed 16.8k chunks at build time. Regenerate them with build.sh.
+data/*
+!data/chunks.jsonl
+!data/vectors.npy
 indexes/
 eval_results.json
 quantization_meta.json

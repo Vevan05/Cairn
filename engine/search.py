@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from array import array
 from collections import defaultdict
 from math import log
 
@@ -70,10 +71,11 @@ class BM25:
         self.doc_lengths: np.ndarray = np.zeros(self.N, dtype=np.int64)
         self.avg_doc_len: float = 0.0
         self._term_doc_freq: dict[str, int] = defaultdict(int)  # df per term
-        # term -> [(doc_idx, term_frequency_in_doc)]. Storing the frequency at
-        # build time avoids re-tokenizing a whole document per posting at query
-        # time (which made search O(postings * doc_length)).
-        self._postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        # term -> array('i') of interleaved [doc_idx, freq, doc_idx, freq, ...].
+        # Compact C ints instead of (int, int) tuples: ~4 bytes vs ~80 bytes per
+        # posting, which matters at scale (1M postings at 16.8k chunks).
+        # Frequencies are computed at build time so search never re-tokenizes.
+        self._postings: dict[str, array] = {}
         self._build()
 
     def _build(self):
@@ -86,7 +88,12 @@ class BM25:
                 tf[tok] = tf.get(tok, 0) + 1
             for tok, freq in tf.items():
                 self._term_doc_freq[tok] += 1
-                self._postings[tok].append((di, freq))
+                arr = self._postings.get(tok)
+                if arr is None:
+                    arr = array("i")
+                    self._postings[tok] = arr
+                arr.append(di)
+                arr.append(freq)
 
         # Average document length
         if self.N > 0:
@@ -104,7 +111,12 @@ class BM25:
             df = self._term_doc_freq.get(tok, 0)
             idf = log((self.N - df + 0.5) / (df + 0.5) + 1.0)  # +1 smoothing
 
-            for di, freq in self._postings.get(tok, []):
+            postings = self._postings.get(tok)
+            if postings is None:
+                continue
+            for i in range(0, len(postings), 2):
+                di = postings[i]
+                freq = postings[i + 1]
                 doc_len = self.doc_lengths[di]
                 # BM25 component for this term in this doc
                 numerator = freq * (self.k1 + 1)
